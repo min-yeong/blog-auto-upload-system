@@ -1,0 +1,9 @@
+config/.env
+cache/browser_state/
+cache/crawled_posts/
+cache/tone_profile.json
+output/
+__pycache__/
+*.pyc
+.DS_Store
+venv/
