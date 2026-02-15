@@ -471,10 +471,18 @@ async def set_thumbnail(page, thumbnail: str, blocks: list[dict]) -> None:
     print(f"  대표이미지 대상: {img_index + 1}번째 이미지 (총 {img_count}장)")
 
     try:
-        # 해당 이미지로 스크롤 후 bounding_box로 클릭
         target_img = img_elements.nth(img_index)
-        await target_img.scroll_into_view_if_needed()
-        await asyncio.sleep(0.5)
+
+        # 이미지를 뷰포트 중앙으로 스크롤 (툴바가 위에 나타나므로 여유 필요)
+        await page.evaluate("""(idx) => {
+            const imgs = document.querySelectorAll('div.se-component.se-image img.se-image-resource');
+            if (imgs[idx]) {
+                const rect = imgs[idx].getBoundingClientRect();
+                const scrollY = window.scrollY + rect.top - window.innerHeight / 3;
+                window.scrollTo({top: scrollY, behavior: 'instant'});
+            }
+        }""", img_index)
+        await asyncio.sleep(1)
 
         box = await target_img.bounding_box()
         if not box:
@@ -483,17 +491,32 @@ async def set_thumbnail(page, thumbnail: str, blocks: list[dict]) -> None:
 
         # 이미지 중앙 클릭 (실제 마우스 이벤트)
         await page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
-        await asyncio.sleep(1.5)
+        await asyncio.sleep(2)
 
-        # '대표' 버튼 찾기 - 화면에 보이는(뷰포트 내) 버튼을 JS로 찾아서 클릭
-        # (DOM 순서상 다른 이미지의 대표 버튼이 먼저 올 수 있으므로 위치 기반으로 찾음)
+        # '대표' 버튼 찾기 - 여러 셀렉터로 시도, 뷰포트 내 버튼만
         repr_rect = await page.evaluate("""() => {
-            const buttons = document.querySelectorAll('button.se-set-rep-image-button');
-            for (const btn of buttons) {
-                const r = btn.getBoundingClientRect();
-                // 뷰포트 내에 있는 버튼만 (y > 0)
-                if (r.width > 0 && r.y > 0 && r.y < window.innerHeight) {
-                    return {x: r.x, y: r.y, w: r.width, h: r.height, cls: btn.className};
+            // 셀렉터 우선순위: 정확한 클래스 → 텍스트 기반
+            const selectors = [
+                'button.se-set-rep-image-button',
+                'button[class*="rep-image"]',
+            ];
+            for (const sel of selectors) {
+                const buttons = document.querySelectorAll(sel);
+                for (const btn of buttons) {
+                    const r = btn.getBoundingClientRect();
+                    if (r.width > 0 && r.y > 0 && r.y < window.innerHeight) {
+                        return {x: r.x, y: r.y, w: r.width, h: r.height};
+                    }
+                }
+            }
+            // 텍스트 기반 폴백: '대표' 텍스트가 포함된 버튼
+            const allBtns = document.querySelectorAll('button');
+            for (const btn of allBtns) {
+                if (btn.textContent.includes('대표') && !btn.classList.contains('se-is-selected')) {
+                    const r = btn.getBoundingClientRect();
+                    if (r.width > 0 && r.y > 0 && r.y < window.innerHeight) {
+                        return {x: r.x, y: r.y, w: r.width, h: r.height};
+                    }
                 }
             }
             return null;
@@ -507,7 +530,32 @@ async def set_thumbnail(page, thumbnail: str, blocks: list[dict]) -> None:
             await asyncio.sleep(1)
             print(f"  🖼️ 대표이미지 설정 완료: {Path(thumbnail).name}")
         else:
-            print(f"  ℹ️ 대표 버튼을 찾을 수 없습니다 - 수동으로 설정해주세요 (이미지 {img_index + 1}번째)")
+            # 재시도: 이미지를 한번 더 클릭해보기 (첫 클릭이 선택 해제였을 수 있음)
+            await page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+            await asyncio.sleep(2)
+
+            repr_rect = await page.evaluate("""() => {
+                const buttons = document.querySelectorAll('button');
+                for (const btn of buttons) {
+                    if (btn.textContent.includes('대표') && !btn.classList.contains('se-is-selected')) {
+                        const r = btn.getBoundingClientRect();
+                        if (r.width > 0 && r.y > 0 && r.y < window.innerHeight) {
+                            return {x: r.x, y: r.y, w: r.width, h: r.height};
+                        }
+                    }
+                }
+                return null;
+            }""")
+
+            if repr_rect:
+                await page.mouse.click(
+                    repr_rect["x"] + repr_rect["w"] / 2,
+                    repr_rect["y"] + repr_rect["h"] / 2,
+                )
+                await asyncio.sleep(1)
+                print(f"  🖼️ 대표이미지 설정 완료 (재시도): {Path(thumbnail).name}")
+            else:
+                print(f"  ℹ️ 대표 버튼을 찾을 수 없습니다 - 수동으로 설정해주세요 (이미지 {img_index + 1}번째)")
 
         # 이미지 선택 해제
         await page.keyboard.press("Escape")
