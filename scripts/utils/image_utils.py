@@ -115,13 +115,17 @@ def stitch_images_horizontally(
     return output_path
 
 
-def mosaic_faces(image_path: str, output_path: str | None = None, mosaic_ratio: int = 15) -> str:
-    """이미지에서 얼굴을 감지하여 모자이크 처리.
+_YUNET_MODEL = Path(__file__).parent / "face_detection_yunet.onnx"
+
+
+def mosaic_faces(image_path: str, output_path: str | None = None, mosaic_ratio: int = 15, confidence: float = 0.85) -> str:
+    """이미지에서 얼굴을 감지하여 모자이크 처리 (YuNet DNN 기반).
 
     Args:
         image_path: 원본 이미지 경로
         output_path: 저장 경로 (None이면 원본 덮어쓰기)
         mosaic_ratio: 모자이크 강도 (높을수록 강한 모자이크)
+        confidence: 얼굴 감지 신뢰도 임계값 (0~1, 높을수록 엄격)
 
     Returns:
         처리된 이미지 경로
@@ -130,47 +134,54 @@ def mosaic_faces(image_path: str, output_path: str | None = None, mosaic_ratio: 
         print("  [경고] opencv 미설치 - 모자이크 스킵")
         return image_path
 
+    if not _YUNET_MODEL.exists():
+        print("  [경고] YuNet 모델 없음 - 모자이크 스킵")
+        return image_path
+
     if not output_path:
         output_path = image_path
 
-    img = cv2.imread(image_path)
-    if img is None:
+    # EXIF 회전 적용하여 읽기
+    pil_img = Image.open(image_path)
+    pil_img = ImageOps.exif_transpose(pil_img)
+    pil_img = pil_img.convert("RGB")
+    img = np.array(pil_img)
+    img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+
+    h, w = img.shape[:2]
+
+    # YuNet 얼굴 감지기 초기화
+    detector = cv2.FaceDetectorYN.create(str(_YUNET_MODEL), "", (w, h), confidence, 0.3)
+    _, faces = detector.detect(img)
+
+    if faces is None or len(faces) == 0:
         return image_path
 
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    # 감지된 얼굴에 모자이크 적용
+    for face in faces:
+        x, y, fw, fh = int(face[0]), int(face[1]), int(face[2]), int(face[3])
 
-    # Haar cascade로 얼굴 감지 (정면 + 프로필)
-    face_cascades = [
-        cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml"),
-        cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_alt2.xml"),
-        cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_profileface.xml"),
-    ]
+        # 모자이크 영역을 30% 확장 (머리/귀 포함)
+        margin_w = int(fw * 0.3)
+        margin_h = int(fh * 0.3)
+        x1 = max(0, x - margin_w)
+        y1 = max(0, y - margin_h)
+        x2 = min(w, x + fw + margin_w)
+        y2 = min(h, y + fh + margin_h)
 
-    all_faces = []
-    for cascade in face_cascades:
-        faces = cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=4, minSize=(30, 30))
-        if len(faces) > 0:
-            all_faces.extend(faces.tolist())
-
-    if not all_faces:
-        return image_path
-
-    # 중복 제거 (겹치는 영역 병합)
-    for (x, y, w, h) in all_faces:
-        # 모자이크 영역을 약간 넓게 잡기 (20% 확장)
-        margin = int(w * 0.2)
-        x1 = max(0, x - margin)
-        y1 = max(0, y - margin)
-        x2 = min(img.shape[1], x + w + margin)
-        y2 = min(img.shape[0], y + h + margin)
+        region_w = x2 - x1
+        region_h = y2 - y1
+        if region_w <= 0 or region_h <= 0:
+            continue
 
         face_region = img[y1:y2, x1:x2]
-        # 축소 후 확대하여 모자이크 효과
-        small = cv2.resize(face_region, (max(1, w // mosaic_ratio), max(1, h // mosaic_ratio)))
-        mosaic = cv2.resize(small, (x2 - x1, y2 - y1), interpolation=cv2.INTER_NEAREST)
+        small_w = max(1, region_w // mosaic_ratio)
+        small_h = max(1, region_h // mosaic_ratio)
+        small = cv2.resize(face_region, (small_w, small_h))
+        mosaic = cv2.resize(small, (region_w, region_h), interpolation=cv2.INTER_NEAREST)
         img[y1:y2, x1:x2] = mosaic
 
-    cv2.imwrite(output_path, img)
+    cv2.imwrite(output_path, img, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
     return output_path
 
 
