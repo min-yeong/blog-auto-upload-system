@@ -1,8 +1,15 @@
-"""이미지 유틸리티: HEIC→JPEG 변환, 리사이즈"""
+"""이미지 유틸리티: HEIC→JPEG 변환, 리사이즈, 얼굴 모자이크"""
 
 import os
 from pathlib import Path
-from PIL import Image, ImageOps
+from PIL import Image, ImageOps, ImageFilter
+
+try:
+    import cv2
+    import numpy as np
+    CV2_AVAILABLE = True
+except ImportError:
+    CV2_AVAILABLE = False
 
 try:
     import pillow_heif
@@ -106,6 +113,95 @@ def stitch_images_horizontally(
 
     canvas.save(output_path, "JPEG", quality=JPEG_QUALITY)
     return output_path
+
+
+def mosaic_faces(image_path: str, output_path: str | None = None, mosaic_ratio: int = 15) -> str:
+    """이미지에서 얼굴을 감지하여 모자이크 처리.
+
+    Args:
+        image_path: 원본 이미지 경로
+        output_path: 저장 경로 (None이면 원본 덮어쓰기)
+        mosaic_ratio: 모자이크 강도 (높을수록 강한 모자이크)
+
+    Returns:
+        처리된 이미지 경로
+    """
+    if not CV2_AVAILABLE:
+        print("  [경고] opencv 미설치 - 모자이크 스킵")
+        return image_path
+
+    if not output_path:
+        output_path = image_path
+
+    img = cv2.imread(image_path)
+    if img is None:
+        return image_path
+
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+
+    # Haar cascade로 얼굴 감지 (정면 + 프로필)
+    face_cascades = [
+        cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml"),
+        cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_alt2.xml"),
+        cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_profileface.xml"),
+    ]
+
+    all_faces = []
+    for cascade in face_cascades:
+        faces = cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=4, minSize=(30, 30))
+        if len(faces) > 0:
+            all_faces.extend(faces.tolist())
+
+    if not all_faces:
+        return image_path
+
+    # 중복 제거 (겹치는 영역 병합)
+    for (x, y, w, h) in all_faces:
+        # 모자이크 영역을 약간 넓게 잡기 (20% 확장)
+        margin = int(w * 0.2)
+        x1 = max(0, x - margin)
+        y1 = max(0, y - margin)
+        x2 = min(img.shape[1], x + w + margin)
+        y2 = min(img.shape[0], y + h + margin)
+
+        face_region = img[y1:y2, x1:x2]
+        # 축소 후 확대하여 모자이크 효과
+        small = cv2.resize(face_region, (max(1, w // mosaic_ratio), max(1, h // mosaic_ratio)))
+        mosaic = cv2.resize(small, (x2 - x1, y2 - y1), interpolation=cv2.INTER_NEAREST)
+        img[y1:y2, x1:x2] = mosaic
+
+    cv2.imwrite(output_path, img)
+    return output_path
+
+
+def mosaic_faces_in_paths(image_paths: list[str], output_dir: str) -> list[str]:
+    """여러 이미지에서 얼굴을 감지하여 모자이크 처리.
+
+    얼굴이 감지된 이미지만 output_dir에 모자이크 버전을 저장하고,
+    얼굴이 없는 이미지는 원본 경로 그대로 반환.
+
+    Returns:
+        처리된 이미지 경로 리스트 (원본 또는 모자이크 버전)
+    """
+    os.makedirs(output_dir, exist_ok=True)
+    result = []
+
+    for path in image_paths:
+        if not Path(path).exists():
+            result.append(path)
+            continue
+
+        out_path = str(Path(output_dir) / Path(path).name)
+        processed = mosaic_faces(path, out_path)
+
+        if processed == path:
+            # 얼굴 없음 → 원본 사용
+            result.append(path)
+        else:
+            result.append(out_path)
+            print(f"  🔲 얼굴 모자이크: {Path(path).name}")
+
+    return result
 
 
 def get_image_info(image_path: str) -> dict:

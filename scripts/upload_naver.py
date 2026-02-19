@@ -20,7 +20,7 @@ from playwright.async_api import async_playwright
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from scripts.utils.naver_auth import ensure_login, BLOG_ID, NAVER_ID, NAVER_PW
-from scripts.utils.image_utils import stitch_images_horizontally
+from scripts.utils.image_utils import stitch_images_horizontally, mosaic_faces_in_paths
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 EDITOR_URL = f"https://blog.naver.com/{BLOG_ID}/postwrite"
@@ -336,6 +336,9 @@ async def set_content_with_images(page, blocks: list[dict]) -> None:
         elif block["type"] == "image":
             paths = block.get("paths", [])
             valid_paths = [p for p in paths if Path(p).exists()]
+            # 얼굴 모자이크 처리
+            mosaic_dir = str(PROJECT_ROOT / "output" / "mosaic")
+            valid_paths = mosaic_faces_in_paths(valid_paths, mosaic_dir)
             if len(valid_paths) >= 2:
                 # 2장 이상이면 가로로 합쳐서 한 장으로 업로드
                 combined_path = str(PROJECT_ROOT / "output" / f"combined_{id(block)}.jpeg")
