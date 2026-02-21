@@ -294,84 +294,25 @@ async def _type_text_block(page, text: str) -> None:
 
 
 async def _type_bullet_list(page, text: str) -> None:
-    """텍스트를 목록(bullet) 형식으로 입력.
+    """텍스트를 bullet(•) 형식으로 입력.
 
-    SmartEditor ONE 텍스트 프로퍼티 툴바의 목록 버튼을 찾아 클릭하여
-    비순차 목록(bullet list) 모드로 전환 후 각 줄을 입력.
+    각 줄 앞에 • 문자를 붙여 입력.
     """
     import pyperclip
 
     lines = [l.strip() for l in text.split("\n") if l.strip()]
 
-    # 목록 버튼 클릭 시도 (도큐먼트 툴바의 data-name='list')
-    clicked = False
+    for i, line in enumerate(lines):
+        pyperclip.copy(f"• {line}")
+        await page.keyboard.press("Meta+v")
+        if i < len(lines) - 1:
+            await page.keyboard.press("Enter")
+        await asyncio.sleep(0.1)
 
-    # 방법 1: Playwright locator (정확한 셀렉터)
-    list_btn = page.locator("button[data-name='list']")
-    if await list_btn.count() > 0:
-        await list_btn.first.click()
-        await asyncio.sleep(1)
-        clicked = True
-
-    # 방법 2: JS 동적 탐색
-    if not clicked:
-        list_info = await page.evaluate("""() => {
-            const buttons = document.querySelectorAll('button');
-            for (const btn of buttons) {
-                const name = (btn.getAttribute('data-name') || '').toLowerCase();
-                const cls = (btn.className || '').toLowerCase();
-                if (name.includes('list') || cls.includes('list')) {
-                    const r = btn.getBoundingClientRect();
-                    if (r.width > 0 && r.height > 0 && r.y > 0 && r.y < window.innerHeight) {
-                        return {found: true, x: r.x + r.width/2, y: r.y + r.height/2, name: name};
-                    }
-                }
-            }
-            return {found: false};
-        }""")
-        if list_info.get("found"):
-            await page.mouse.click(list_info["x"], list_info["y"])
-            await asyncio.sleep(1)
-            clicked = True
-
-    if not clicked:
-        # 폴백: bullet 문자(•) 사용
-        print("  [경고] 목록 버튼 없음 - • 문자로 대체")
-        for i, line in enumerate(lines):
-            pyperclip.copy(f"• {line}")
-            await page.keyboard.press("Meta+v")
-            if i < len(lines) - 1:
-                await page.keyboard.press("Enter")
-            await asyncio.sleep(0.1)
-        await asyncio.sleep(ACTION_DELAY / 1000)
-        print("  📋 목록 입력 완료 (• 문자)")
-        return
-
-    # 목록 스타일 선택 팝업 처리 (첫 번째 = bullet 스타일)
-    style_popup = page.locator("div.se-popup-content button:visible, div.se-select-option button:visible")
-    if await style_popup.count() > 0:
-        await style_popup.first.click()
-        await asyncio.sleep(0.5)
-
-    try:
-        for i, line in enumerate(lines):
-            pyperclip.copy(line)
-            await page.keyboard.press("Meta+v")
-            if i < len(lines) - 1:
-                await page.keyboard.press("Enter")
-            await asyncio.sleep(0.1)
-
-        await asyncio.sleep(0.5)
-
-        # 목록 모드 종료: Enter로 빈 항목 생성 → 자동 해제
-        await page.keyboard.press("Enter")
-        await asyncio.sleep(0.2)
-        await page.keyboard.press("Enter")
-        await asyncio.sleep(0.2)
-
-        print("  📋 목록 형식 입력 완료")
-    except Exception as e:
-        print(f"  [경고] 목록 입력 실패: {e}", file=sys.stderr)
+    await asyncio.sleep(ACTION_DELAY / 1000)
+    await page.keyboard.press("Enter")
+    await asyncio.sleep(0.2)
+    print("  📋 영업정보 입력 완료")
 
 
 async def insert_place_widget(page, place_name: str) -> None:
