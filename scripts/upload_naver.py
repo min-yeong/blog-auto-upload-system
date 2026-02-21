@@ -213,6 +213,71 @@ async def _insert_separator(page) -> None:
         await page.keyboard.press("Escape")
 
 
+async def _insert_quotation_block(page, text: str) -> None:
+    """인용구(좌측 바) 블록 삽입 후 텍스트 입력.
+
+    SmartEditor ONE 도큐먼트 툴바의 인용구 버튼을 클릭하여 인용구 컴포넌트를 삽입하고,
+    텍스트를 입력한 후 인용구 밖으로 커서를 이동.
+    """
+    import pyperclip
+
+    # 인용구 기본 버튼 (상단 도큐먼트 툴바)
+    quote_btn = page.locator("button.se-insert-quotation-default-toolbar-button")
+    if await quote_btn.count() == 0:
+        quote_btn = page.locator("li.se-toolbar-item-insert-quotation button.se-document-toolbar-icon-select-button")
+    if await quote_btn.count() == 0:
+        quote_btn = page.locator("li.se-toolbar-item-insert-quotation button")
+
+    if await quote_btn.count() == 0:
+        print("  [경고] 인용구 버튼을 찾을 수 없습니다 - 일반 텍스트로 대체", file=sys.stderr)
+        await _type_text_block(page, text)
+        return
+
+    try:
+        await quote_btn.first.click()
+        await asyncio.sleep(1.5)
+
+        # 인용구 스타일 선택 팝업이 나타날 수 있음 → 첫 번째 스타일(좌측 바) 선택
+        style_item = page.locator("div.se-popup-content button:visible, div.se-select-option button:visible")
+        if await style_item.count() > 0:
+            await style_item.first.click()
+            await asyncio.sleep(0.5)
+
+        # 인용구 블록 안에 텍스트 입력
+        pyperclip.copy(text)
+        await page.keyboard.press("Meta+v")
+        await asyncio.sleep(0.5)
+
+        # 인용구 밖으로 커서 이동: 인용구 다음 텍스트 컴포넌트 클릭
+        moved = await page.evaluate("""() => {
+            const quotations = document.querySelectorAll('div.se-component.se-quotation');
+            if (quotations.length === 0) return false;
+            const quotation = quotations[quotations.length - 1];
+            let next = quotation.nextElementSibling;
+            while (next) {
+                const p = next.querySelector('p.se-text-paragraph');
+                if (p) {
+                    p.click();
+                    return true;
+                }
+                next = next.nextElementSibling;
+            }
+            return false;
+        }""")
+
+        if not moved:
+            await page.keyboard.press("Escape")
+            await asyncio.sleep(0.3)
+            await page.keyboard.press("ArrowDown")
+            await asyncio.sleep(0.3)
+
+        await asyncio.sleep(0.5)
+        print(f"  📌 인용구 삽입 완료: {text}")
+    except Exception as e:
+        print(f"  [경고] 인용구 삽입 실패: {e} - 일반 텍스트로 대체", file=sys.stderr)
+        await _type_text_block(page, text)
+
+
 async def _type_text_block(page, text: str) -> None:
     """텍스트 블록 입력 (커서 위치에)."""
     import pyperclip
@@ -226,6 +291,87 @@ async def _type_text_block(page, text: str) -> None:
             await page.keyboard.press("Enter")
         await asyncio.sleep(0.1)
     await asyncio.sleep(ACTION_DELAY / 1000)
+
+
+async def _type_bullet_list(page, text: str) -> None:
+    """텍스트를 목록(bullet) 형식으로 입력.
+
+    SmartEditor ONE 텍스트 프로퍼티 툴바의 목록 버튼을 찾아 클릭하여
+    비순차 목록(bullet list) 모드로 전환 후 각 줄을 입력.
+    """
+    import pyperclip
+
+    lines = [l.strip() for l in text.split("\n") if l.strip()]
+
+    # 목록 버튼 클릭 시도
+    clicked = False
+
+    # 방법 1: Playwright locator (알려진 셀렉터 순차 시도)
+    for selector in [
+        "button[data-name='lineList']",
+        "button[data-name='line-list']",
+        "button[data-name='unorderedList']",
+        "button.se-line-list-toolbar-button",
+    ]:
+        btn = page.locator(selector)
+        if await btn.count() > 0:
+            await btn.first.click()
+            await asyncio.sleep(0.5)
+            clicked = True
+            break
+
+    # 방법 2: JS 동적 탐색 (data-name 또는 class에 'list' 포함된 visible 버튼)
+    if not clicked:
+        list_info = await page.evaluate("""() => {
+            const buttons = document.querySelectorAll('button');
+            for (const btn of buttons) {
+                const name = (btn.getAttribute('data-name') || '').toLowerCase();
+                const cls = (btn.className || '').toLowerCase();
+                if (name.includes('list') || cls.includes('list')) {
+                    const r = btn.getBoundingClientRect();
+                    if (r.width > 0 && r.height > 0 && r.y > 0 && r.y < window.innerHeight) {
+                        return {found: true, x: r.x + r.width/2, y: r.y + r.height/2, name: name};
+                    }
+                }
+            }
+            return {found: false};
+        }""")
+        if list_info.get("found"):
+            print(f"  목록 버튼 발견: {list_info.get('name', '?')}")
+            await page.mouse.click(list_info["x"], list_info["y"])
+            await asyncio.sleep(0.5)
+            clicked = True
+
+    if not clicked:
+        print("  [경고] 목록 버튼을 찾을 수 없습니다 - 일반 텍스트로 대체", file=sys.stderr)
+        await _type_text_block(page, text)
+        return
+
+    # 목록 스타일 선택 팝업 처리 (첫 번째 = bullet 스타일)
+    style_popup = page.locator("div.se-popup-content button:visible, div.se-select-option button:visible")
+    if await style_popup.count() > 0:
+        await style_popup.first.click()
+        await asyncio.sleep(0.5)
+
+    try:
+        for i, line in enumerate(lines):
+            pyperclip.copy(line)
+            await page.keyboard.press("Meta+v")
+            if i < len(lines) - 1:
+                await page.keyboard.press("Enter")
+            await asyncio.sleep(0.1)
+
+        await asyncio.sleep(0.5)
+
+        # 목록 모드 종료: Enter로 빈 항목 생성 → 자동 해제
+        await page.keyboard.press("Enter")
+        await asyncio.sleep(0.2)
+        await page.keyboard.press("Enter")
+        await asyncio.sleep(0.2)
+
+        print("  📋 목록 형식 입력 완료")
+    except Exception as e:
+        print(f"  [경고] 목록 입력 실패: {e}", file=sys.stderr)
 
 
 async def insert_place_widget(page, place_name: str) -> None:
@@ -424,15 +570,44 @@ async def set_content_with_images(page, blocks: list[dict]) -> None:
     await asyncio.sleep(ACTION_DELAY / 1000)
 
     font_size_set = False
+    text_block_index = 0
+
     for block in blocks:
         if block["type"] == "text":
-            await _type_text_block(page, block["content"])
-            # 첫 텍스트 블록 입력 후 글씨크기 설정 (SmartEditor ONE 최소: 13)
-            if not font_size_set:
-                await set_font_size(page, size=13)
-                font_size_set = True
-            await page.keyboard.press("Enter")
-            await asyncio.sleep(0.3)
+            if text_block_index == 0:
+                # 첫 번째 텍스트: 첫 줄 → 인용구(좌측 바), 나머지 → 일반 텍스트
+                lines = block["content"].split("\n")
+                first_line = lines[0].strip()
+                rest_lines = "\n".join(l for l in lines[1:] if l.strip())
+
+                await _insert_quotation_block(page, first_line)
+
+                if rest_lines:
+                    await _type_text_block(page, rest_lines)
+                    # 본문 텍스트 입력 후 글씨크기 설정 (SmartEditor ONE 최소: 13)
+                    if not font_size_set:
+                        await set_font_size(page, size=13)
+                        font_size_set = True
+                    await page.keyboard.press("Enter")
+                    await asyncio.sleep(0.3)
+
+            elif text_block_index == 1:
+                # 두 번째 텍스트 (영업정보): 목록(bullet) 형식
+                await _type_bullet_list(page, block["content"])
+                if not font_size_set:
+                    await set_font_size(page, size=13)
+                    font_size_set = True
+
+            else:
+                # 나머지: 일반 텍스트
+                await _type_text_block(page, block["content"])
+                if not font_size_set:
+                    await set_font_size(page, size=13)
+                    font_size_set = True
+                await page.keyboard.press("Enter")
+                await asyncio.sleep(0.3)
+
+            text_block_index += 1
         elif block["type"] == "separator":
             await _insert_separator(page)
             await asyncio.sleep(0.3)
@@ -835,6 +1010,8 @@ async def test_upload():
                 "글씨크기 버튼(data-name)": "button[data-name='font-size']",
                 "구분선 버튼": "button.se-insert-horizontal-line-default-toolbar-button",
                 "구분선 버튼(li)": "li.se-toolbar-item-insert-horizontal-line",
+                "인용구 버튼": "button.se-insert-quotation-default-toolbar-button",
+                "인용구 버튼(li)": "li.se-toolbar-item-insert-quotation",
             }
             all_ok = True
             for name, sel in checks.items():
