@@ -122,14 +122,15 @@ async def set_content(page, content: str) -> None:
 async def set_font_size(page, size: int = 11) -> None:
     """에디터 글씨크기 설정 (본문 영역 클릭 후 호출).
 
-    네이버 SmartEditor ONE 툴바의 글씨크기 드롭다운을 열어 원하는 크기를 선택.
+    네이버 SmartEditor ONE 텍스트 프로퍼티 툴바의 글씨크기 드롭다운을 열어 원하는 크기를 선택.
+    본문 클릭 후에만 텍스트 프로퍼티 툴바가 나타남.
     """
-    # 글씨크기 드롭다운 버튼 찾기 (다중 폴백)
-    font_btn = page.locator("button[data-name='fontSize']")
+    # 글씨크기 드롭다운 버튼 찾기 (본문 클릭 후 나타나는 텍스트 프로퍼티 툴바)
+    font_btn = page.locator("button.se-font-size-code-toolbar-button")
+    if await font_btn.count() == 0:
+        font_btn = page.locator("button[data-name='font-size']")
     if await font_btn.count() == 0:
         font_btn = page.locator("button.se-toolbar-button-fontSize")
-    if await font_btn.count() == 0:
-        font_btn = page.locator("button:has-text('글씨 크기')")
 
     if await font_btn.count() == 0:
         print("  [경고] 글씨크기 버튼을 찾을 수 없습니다", file=sys.stderr)
@@ -139,37 +140,38 @@ async def set_font_size(page, size: int = 11) -> None:
         await font_btn.first.click()
         await asyncio.sleep(1)
 
-        # 드롭다운에서 원하는 크기 선택
-        size_option = page.locator(f"li[data-value='{size}']")
-        if await size_option.count() == 0:
-            size_option = page.locator(f"button:has-text('{size}')")
-        if await size_option.count() == 0:
-            # 팝업 내 텍스트 매칭
-            size_option = page.locator(f"div.se-popup-font-size li >> text='{size}'")
+        # 드롭다운에서 원하는 크기 선택 (JS로 정확하게 매칭)
+        result = await page.evaluate(f"""() => {{
+            // 드롭다운 리스트 내 항목 찾기
+            const items = document.querySelectorAll(
+                '.se-property-toolbar-drop-down-content button, ' +
+                '.se-drop-down-list button, ' +
+                '.se-popup-content button, ' +
+                'ul[class*="font-size"] li button, ' +
+                'ul[class*="font-size"] li'
+            );
+            for (const item of items) {{
+                const text = item.textContent.trim();
+                if (text === '{size}' || text === '{size}pt') {{
+                    item.click();
+                    return {{clicked: true, text: text}};
+                }}
+            }}
+            // 폴백: data-value로 찾기
+            const byValue = document.querySelector('[data-value="{size}"]');
+            if (byValue) {{
+                byValue.click();
+                return {{clicked: true, method: 'data-value'}};
+            }}
+            return {{clicked: false, itemCount: items.length}};
+        }}""")
 
-        if await size_option.count() > 0:
-            await size_option.first.click()
+        if result.get("clicked"):
             await asyncio.sleep(0.5)
             print(f"  🔤 글씨크기 {size} 설정 완료")
         else:
-            # JS로 직접 설정 시도
-            result = await page.evaluate(f"""() => {{
-                const items = document.querySelectorAll('.se-popup-font-size-list li, .se-popup-content li');
-                for (const li of items) {{
-                    if (li.textContent.trim() === '{size}') {{
-                        li.click();
-                        return true;
-                    }}
-                }}
-                return false;
-            }}""")
-            if result:
-                await asyncio.sleep(0.5)
-                print(f"  🔤 글씨크기 {size} 설정 완료 (JS)")
-            else:
-                print(f"  [경고] 글씨크기 {size} 옵션을 찾을 수 없습니다", file=sys.stderr)
-                # 팝업 닫기
-                await page.keyboard.press("Escape")
+            print(f"  [경고] 글씨크기 {size} 옵션을 찾을 수 없습니다 (항목 {result.get('itemCount', 0)}개)", file=sys.stderr)
+            await page.keyboard.press("Escape")
     except Exception as e:
         print(f"  [경고] 글씨크기 설정 실패: {e}", file=sys.stderr)
         await page.keyboard.press("Escape")
@@ -178,14 +180,16 @@ async def set_font_size(page, size: int = 11) -> None:
 async def _insert_separator(page) -> None:
     """에디터에 구분선(수평선) 삽입.
 
-    네이버 SmartEditor ONE 툴바의 구분선 버튼을 클릭하여 삽입.
+    네이버 SmartEditor ONE 상단 도큐먼트 툴바의 구분선 버튼을 클릭하여 삽입.
+    셀렉터: button.se-insert-horizontal-line-default-toolbar-button
+    스타일 선택 드롭다운: 옆의 se-document-toolbar-select-option-button
     """
-    # 구분선 버튼 찾기 (다중 폴백)
-    sep_btn = page.locator("button[data-name='horizontalRule']")
+    # 구분선 기본 버튼 (상단 도큐먼트 툴바)
+    sep_btn = page.locator("button.se-insert-horizontal-line-default-toolbar-button")
     if await sep_btn.count() == 0:
-        sep_btn = page.locator("button.se-toolbar-button-horizontalRule")
+        sep_btn = page.locator("li.se-toolbar-item-insert-horizontal-line button.se-document-toolbar-icon-select-button")
     if await sep_btn.count() == 0:
-        sep_btn = page.locator("button:has-text('구분선')")
+        sep_btn = page.locator("button[data-name='horizontalRule']")
 
     if await sep_btn.count() == 0:
         print("  [경고] 구분선 버튼을 찾을 수 없습니다", file=sys.stderr)
@@ -196,7 +200,7 @@ async def _insert_separator(page) -> None:
         await asyncio.sleep(1)
 
         # 구분선 스타일 선택 팝업이 나타날 수 있음 → 첫 번째 스타일 선택
-        style_item = page.locator("div.se-popup-horizontalRule-list button, div.se-popup-content button.se-horizontal-rule-button")
+        style_item = page.locator("div.se-popup-content button, div.se-select-option button")
         if await style_item.count() > 0:
             await style_item.first.click()
             await asyncio.sleep(0.5)
@@ -823,10 +827,10 @@ async def test_upload():
                 "제목 영역": "div.se-title-text",
                 "contenteditable": "div[contenteditable]",
                 "블로그 에디터": ".blog_editor",
-                "글씨크기 버튼": "button[data-name='fontSize']",
-                "글씨크기 버튼(클래스)": "button.se-toolbar-button-fontSize",
-                "구분선 버튼": "button[data-name='horizontalRule']",
-                "구분선 버튼(클래스)": "button.se-toolbar-button-horizontalRule",
+                "글씨크기 버튼": "button.se-font-size-code-toolbar-button",
+                "글씨크기 버튼(data-name)": "button[data-name='font-size']",
+                "구분선 버튼": "button.se-insert-horizontal-line-default-toolbar-button",
+                "구분선 버튼(li)": "li.se-toolbar-item-insert-horizontal-line",
             }
             all_ok = True
             for name, sel in checks.items():
@@ -841,6 +845,30 @@ async def test_upload():
                 print("\n✅ 테스트 통과 - 업로드 준비 완료")
             else:
                 print("\n⚠️  일부 셀렉터를 찾지 못했습니다")
+
+            # 임시저장 팝업 닫기 (본문 클릭 전)
+            cancel_btn = page.locator("div.se-popup-alert-confirm button:has-text('취소')")
+            if await cancel_btn.count() > 0:
+                await cancel_btn.first.click()
+                await asyncio.sleep(1)
+                print("  이전 임시저장 무시 (새 글 작성)")
+
+            # 본문 클릭 후 텍스트 프로퍼티 툴바 셀렉터 재확인
+            print("\n--- 본문 클릭 후 셀렉터 재확인 ---")
+            body_area = page.locator("p.se-text-paragraph")
+            if await body_area.count() == 0:
+                body_area = page.locator("span.se-placeholder")
+            if await body_area.count() > 0:
+                await body_area.first.click()
+                await asyncio.sleep(2)
+
+                font_btn = page.locator("button.se-font-size-code-toolbar-button")
+                font_count = await font_btn.count()
+                if font_count > 0:
+                    font_text = await font_btn.first.text_content()
+                    print(f"  ✅ 글씨크기 버튼 (본문 클릭 후): {font_count}개 (현재값: {font_text.strip()[:10]})")
+                else:
+                    print(f"  ❌ 글씨크기 버튼 (본문 클릭 후): 없음")
 
         finally:
             await context.close()
