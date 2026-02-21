@@ -119,6 +119,94 @@ async def set_content(page, content: str) -> None:
     await asyncio.sleep(ACTION_DELAY / 1000)
 
 
+async def set_font_size(page, size: int = 11) -> None:
+    """에디터 글씨크기 설정 (본문 영역 클릭 후 호출).
+
+    네이버 SmartEditor ONE 툴바의 글씨크기 드롭다운을 열어 원하는 크기를 선택.
+    """
+    # 글씨크기 드롭다운 버튼 찾기 (다중 폴백)
+    font_btn = page.locator("button[data-name='fontSize']")
+    if await font_btn.count() == 0:
+        font_btn = page.locator("button.se-toolbar-button-fontSize")
+    if await font_btn.count() == 0:
+        font_btn = page.locator("button:has-text('글씨 크기')")
+
+    if await font_btn.count() == 0:
+        print("  [경고] 글씨크기 버튼을 찾을 수 없습니다", file=sys.stderr)
+        return
+
+    try:
+        await font_btn.first.click()
+        await asyncio.sleep(1)
+
+        # 드롭다운에서 원하는 크기 선택
+        size_option = page.locator(f"li[data-value='{size}']")
+        if await size_option.count() == 0:
+            size_option = page.locator(f"button:has-text('{size}')")
+        if await size_option.count() == 0:
+            # 팝업 내 텍스트 매칭
+            size_option = page.locator(f"div.se-popup-font-size li >> text='{size}'")
+
+        if await size_option.count() > 0:
+            await size_option.first.click()
+            await asyncio.sleep(0.5)
+            print(f"  🔤 글씨크기 {size} 설정 완료")
+        else:
+            # JS로 직접 설정 시도
+            result = await page.evaluate(f"""() => {{
+                const items = document.querySelectorAll('.se-popup-font-size-list li, .se-popup-content li');
+                for (const li of items) {{
+                    if (li.textContent.trim() === '{size}') {{
+                        li.click();
+                        return true;
+                    }}
+                }}
+                return false;
+            }}""")
+            if result:
+                await asyncio.sleep(0.5)
+                print(f"  🔤 글씨크기 {size} 설정 완료 (JS)")
+            else:
+                print(f"  [경고] 글씨크기 {size} 옵션을 찾을 수 없습니다", file=sys.stderr)
+                # 팝업 닫기
+                await page.keyboard.press("Escape")
+    except Exception as e:
+        print(f"  [경고] 글씨크기 설정 실패: {e}", file=sys.stderr)
+        await page.keyboard.press("Escape")
+
+
+async def _insert_separator(page) -> None:
+    """에디터에 구분선(수평선) 삽입.
+
+    네이버 SmartEditor ONE 툴바의 구분선 버튼을 클릭하여 삽입.
+    """
+    # 구분선 버튼 찾기 (다중 폴백)
+    sep_btn = page.locator("button[data-name='horizontalRule']")
+    if await sep_btn.count() == 0:
+        sep_btn = page.locator("button.se-toolbar-button-horizontalRule")
+    if await sep_btn.count() == 0:
+        sep_btn = page.locator("button:has-text('구분선')")
+
+    if await sep_btn.count() == 0:
+        print("  [경고] 구분선 버튼을 찾을 수 없습니다", file=sys.stderr)
+        return
+
+    try:
+        await sep_btn.first.click()
+        await asyncio.sleep(1)
+
+        # 구분선 스타일 선택 팝업이 나타날 수 있음 → 첫 번째 스타일 선택
+        style_item = page.locator("div.se-popup-horizontalRule-list button, div.se-popup-content button.se-horizontal-rule-button")
+        if await style_item.count() > 0:
+            await style_item.first.click()
+            await asyncio.sleep(0.5)
+
+        print("  ── 구분선 삽입 완료")
+    except Exception as e:
+        print(f"  [경고] 구분선 삽입 실패: {e}", file=sys.stderr)
+        await page.keyboard.press("Escape")
+
+
 async def _type_text_block(page, text: str) -> None:
     """텍스트 블록 입력 (커서 위치에)."""
     import pyperclip
@@ -314,6 +402,7 @@ async def set_content_with_images(page, blocks: list[dict]) -> None:
       [
         {"type": "text", "content": "글 내용..."},
         {"type": "image", "paths": ["/path/to/img1.jpeg", ...]},
+        {"type": "separator"},
         {"type": "text", "content": "다음 글 내용..."},
         ...
       ]
@@ -328,10 +417,16 @@ async def set_content_with_images(page, blocks: list[dict]) -> None:
     await body_area.first.click()
     await asyncio.sleep(ACTION_DELAY / 1000)
 
+    # 글씨크기 11 설정
+    await set_font_size(page, size=11)
+
     for block in blocks:
         if block["type"] == "text":
             await _type_text_block(page, block["content"])
             await page.keyboard.press("Enter")
+            await asyncio.sleep(0.3)
+        elif block["type"] == "separator":
+            await _insert_separator(page)
             await asyncio.sleep(0.3)
         elif block["type"] == "image":
             paths = block.get("paths", [])
@@ -728,6 +823,10 @@ async def test_upload():
                 "제목 영역": "div.se-title-text",
                 "contenteditable": "div[contenteditable]",
                 "블로그 에디터": ".blog_editor",
+                "글씨크기 버튼": "button[data-name='fontSize']",
+                "글씨크기 버튼(클래스)": "button.se-toolbar-button-fontSize",
+                "구분선 버튼": "button[data-name='horizontalRule']",
+                "구분선 버튼(클래스)": "button.se-toolbar-button-horizontalRule",
             }
             all_ok = True
             for name, sel in checks.items():
