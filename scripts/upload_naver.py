@@ -303,24 +303,17 @@ async def _type_bullet_list(page, text: str) -> None:
 
     lines = [l.strip() for l in text.split("\n") if l.strip()]
 
-    # 목록 버튼 클릭 시도
+    # 목록 버튼 클릭 시도 (도큐먼트 툴바의 data-name='list')
     clicked = False
 
-    # 방법 1: Playwright locator (알려진 셀렉터 순차 시도)
-    for selector in [
-        "button[data-name='lineList']",
-        "button[data-name='line-list']",
-        "button[data-name='unorderedList']",
-        "button.se-line-list-toolbar-button",
-    ]:
-        btn = page.locator(selector)
-        if await btn.count() > 0:
-            await btn.first.click()
-            await asyncio.sleep(0.5)
-            clicked = True
-            break
+    # 방법 1: Playwright locator (정확한 셀렉터)
+    list_btn = page.locator("button[data-name='list']")
+    if await list_btn.count() > 0:
+        await list_btn.first.click()
+        await asyncio.sleep(1)
+        clicked = True
 
-    # 방법 2: JS 동적 탐색 (data-name 또는 class에 'list' 포함된 visible 버튼)
+    # 방법 2: JS 동적 탐색
     if not clicked:
         list_info = await page.evaluate("""() => {
             const buttons = document.querySelectorAll('button');
@@ -337,14 +330,21 @@ async def _type_bullet_list(page, text: str) -> None:
             return {found: false};
         }""")
         if list_info.get("found"):
-            print(f"  목록 버튼 발견: {list_info.get('name', '?')}")
             await page.mouse.click(list_info["x"], list_info["y"])
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(1)
             clicked = True
 
     if not clicked:
-        print("  [경고] 목록 버튼을 찾을 수 없습니다 - 일반 텍스트로 대체", file=sys.stderr)
-        await _type_text_block(page, text)
+        # 폴백: bullet 문자(•) 사용
+        print("  [경고] 목록 버튼 없음 - • 문자로 대체")
+        for i, line in enumerate(lines):
+            pyperclip.copy(f"• {line}")
+            await page.keyboard.press("Meta+v")
+            if i < len(lines) - 1:
+                await page.keyboard.press("Enter")
+            await asyncio.sleep(0.1)
+        await asyncio.sleep(ACTION_DELAY / 1000)
+        print("  📋 목록 입력 완료 (• 문자)")
         return
 
     # 목록 스타일 선택 팝업 처리 (첫 번째 = bullet 스타일)
@@ -547,7 +547,7 @@ async def _insert_image_block(page, img_path: str) -> None:
     print(f"  📸 {Path(img_path).name}")
 
 
-async def set_content_with_images(page, blocks: list[dict]) -> None:
+async def set_content_with_images(page, blocks: list[dict], place: str = "") -> None:
     """텍스트와 이미지를 교차 입력.
 
     blocks 형식:
@@ -558,6 +558,8 @@ async def set_content_with_images(page, blocks: list[dict]) -> None:
         {"type": "text", "content": "다음 글 내용..."},
         ...
       ]
+
+    place: 장소 이름 (첫 번째 구분선 뒤에 네이버 지도 위젯 삽입)
     """
     # 본문 영역 클릭
     body_area = page.locator("p.se-text-paragraph")
@@ -571,25 +573,18 @@ async def set_content_with_images(page, blocks: list[dict]) -> None:
 
     font_size_set = False
     text_block_index = 0
+    separator_count = 0
 
     for block in blocks:
         if block["type"] == "text":
             if text_block_index == 0:
-                # 첫 번째 텍스트: 첫 줄 → 인용구(좌측 바), 나머지 → 일반 텍스트
-                lines = block["content"].split("\n")
-                first_line = lines[0].strip()
-                rest_lines = "\n".join(l for l in lines[1:] if l.strip())
-
-                await _insert_quotation_block(page, first_line)
-
-                if rest_lines:
-                    await _type_text_block(page, rest_lines)
-                    # 본문 텍스트 입력 후 글씨크기 설정 (SmartEditor ONE 최소: 13)
-                    if not font_size_set:
-                        await set_font_size(page, size=13)
-                        font_size_set = True
-                    await page.keyboard.press("Enter")
-                    await asyncio.sleep(0.3)
+                # 첫 번째 텍스트: 일반 텍스트 (식당 소개)
+                await _type_text_block(page, block["content"])
+                if not font_size_set:
+                    await set_font_size(page, size=13)
+                    font_size_set = True
+                await page.keyboard.press("Enter")
+                await asyncio.sleep(0.3)
 
             elif text_block_index == 1:
                 # 두 번째 텍스트 (영업정보): 목록(bullet) 형식
@@ -610,6 +605,11 @@ async def set_content_with_images(page, blocks: list[dict]) -> None:
             text_block_index += 1
         elif block["type"] == "separator":
             await _insert_separator(page)
+            separator_count += 1
+            # 첫 번째 구분선 뒤에 장소(네이버 지도) 위젯 삽입
+            if separator_count == 1 and place:
+                print("  장소 삽입...")
+                await insert_place_widget(page, place)
             await asyncio.sleep(0.3)
         elif block["type"] == "image":
             paths = block.get("paths", [])
@@ -908,22 +908,10 @@ async def upload_post(
             print("  제목 입력...")
             await set_title(page, title)
 
-            # 3. 장소(네이버 지도) 삽입 - 본문 맨 앞에
-            if place:
-                print("  장소 삽입...")
-                # 본문 영역 클릭하여 커서 이동
-                body_area = page.locator("p.se-text-paragraph")
-                if await body_area.count() == 0:
-                    body_area = page.locator("span.se-placeholder")
-                if await body_area.count() > 0:
-                    await body_area.first.click()
-                    await asyncio.sleep(0.5)
-                await insert_place_widget(page, place)
-
-            # 4. 본문 + 이미지 입력
+            # 3. 본문 + 이미지 입력 (장소 위젯은 첫 구분선 뒤에 삽입)
             if blocks:
                 print("  본문+이미지 교차 입력...")
-                await set_content_with_images(page, blocks)
+                await set_content_with_images(page, blocks, place=place)
             else:
                 print("  본문 입력...")
                 await set_content(page, content)
@@ -1034,13 +1022,19 @@ async def test_upload():
                 await asyncio.sleep(1)
                 print("  이전 임시저장 무시 (새 글 작성)")
 
-            # 본문 클릭 후 텍스트 프로퍼티 툴바 셀렉터 재확인
+            # 본문(제목 아닌 본문) 클릭 후 텍스트 프로퍼티 툴바 셀렉터 재확인
             print("\n--- 본문 클릭 후 셀렉터 재확인 ---")
-            body_area = page.locator("p.se-text-paragraph")
+            # 제목이 아닌 본문 텍스트 영역을 정확히 클릭
+            body_area = page.locator("div.se-component.se-text p.se-text-paragraph")
             if await body_area.count() == 0:
                 body_area = page.locator("span.se-placeholder")
             if await body_area.count() > 0:
-                await body_area.first.click()
+                await body_area.last.click()
+                await asyncio.sleep(1)
+                # 본문에 텍스트 입력 (텍스트 프로퍼티 툴바 활성화)
+                import pyperclip
+                pyperclip.copy("테스트")
+                await page.keyboard.press("Meta+v")
                 await asyncio.sleep(2)
 
                 font_btn = page.locator("button.se-font-size-code-toolbar-button")
@@ -1050,6 +1044,55 @@ async def test_upload():
                     print(f"  ✅ 글씨크기 버튼 (본문 클릭 후): {font_count}개 (현재값: {font_text.strip()[:10]})")
                 else:
                     print(f"  ❌ 글씨크기 버튼 (본문 클릭 후): 없음")
+
+                # 텍스트 프로퍼티 툴바 내 모든 버튼 탐색 (목록 버튼 찾기)
+                print("\n--- 텍스트 프로퍼티 툴바 버튼 탐색 ---")
+                toolbar_btns = await page.evaluate("""() => {
+                    const results = [];
+                    // 방법 1: font-size 버튼의 부모 툴바에서 형제 버튼 탐색
+                    const fontBtn = document.querySelector('button.se-font-size-code-toolbar-button');
+                    if (fontBtn) {
+                        let toolbar = fontBtn.closest('[class*=toolbar]');
+                        if (toolbar) {
+                            const btns = toolbar.querySelectorAll('button');
+                            for (const btn of btns) {
+                                const name = btn.getAttribute('data-name') || '';
+                                const cls = btn.className || '';
+                                const text = btn.textContent.trim().substring(0, 20);
+                                results.push({name, cls: cls.substring(0, 80), text});
+                            }
+                        }
+                    }
+                    // 방법 2: 모든 visible 버튼 중 list/목록 관련
+                    const allBtns = document.querySelectorAll('button');
+                    const listRelated = [];
+                    for (const btn of allBtns) {
+                        const name = (btn.getAttribute('data-name') || '').toLowerCase();
+                        const cls = (btn.className || '').toLowerCase();
+                        const text = (btn.textContent || '').toLowerCase();
+                        const combined = name + ' ' + cls + ' ' + text;
+                        if (combined.includes('list') || combined.includes('목록') || combined.includes('글머리')) {
+                            const r = btn.getBoundingClientRect();
+                            listRelated.push({
+                                name: btn.getAttribute('data-name') || '',
+                                cls: (btn.className || '').substring(0, 80),
+                                text: btn.textContent.trim().substring(0, 30),
+                                visible: r.width > 0 && r.height > 0,
+                                y: Math.round(r.y)
+                            });
+                        }
+                    }
+                    return {toolbar_buttons: results, list_related: listRelated};
+                }""")
+
+                print(f"  텍스트 툴바 버튼 ({len(toolbar_btns.get('toolbar_buttons', []))}개):")
+                for btn in toolbar_btns.get("toolbar_buttons", []):
+                    print(f"    data-name='{btn['name']}' text='{btn['text']}' cls='{btn['cls'][:50]}'")
+
+                print(f"\n  목록 관련 버튼 ({len(toolbar_btns.get('list_related', []))}개):")
+                for btn in toolbar_btns.get("list_related", []):
+                    marker = "✅" if btn["visible"] else "❌"
+                    print(f"    {marker} data-name='{btn['name']}' text='{btn['text']}' visible={btn['visible']} y={btn['y']}")
 
         finally:
             await context.close()
