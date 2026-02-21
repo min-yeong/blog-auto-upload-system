@@ -138,39 +138,41 @@ async def set_font_size(page, size: int = 11) -> None:
 
     try:
         await font_btn.first.click()
-        await asyncio.sleep(1)
+        await asyncio.sleep(1.5)
 
-        # 드롭다운에서 원하는 크기 선택 (JS로 정확하게 매칭)
-        result = await page.evaluate(f"""() => {{
-            // 드롭다운 리스트 내 항목 찾기
-            const items = document.querySelectorAll(
-                '.se-property-toolbar-drop-down-content button, ' +
-                '.se-drop-down-list button, ' +
-                '.se-popup-content button, ' +
-                'ul[class*="font-size"] li button, ' +
-                'ul[class*="font-size"] li'
-            );
-            for (const item of items) {{
-                const text = item.textContent.trim();
-                if (text === '{size}' || text === '{size}pt') {{
-                    item.click();
-                    return {{clicked: true, text: text}};
-                }}
-            }}
-            // 폴백: data-value로 찾기
-            const byValue = document.querySelector('[data-value="{size}"]');
-            if (byValue) {{
-                byValue.click();
-                return {{clicked: true, method: 'data-value'}};
-            }}
-            return {{clicked: false, itemCount: items.length}};
-        }}""")
+        # 드롭다운에서 원하는 크기 선택
+        # Playwright locator로 직접 클릭 시도
+        size_option = page.locator(f"li:has-text('{size}')").first
+        try:
+            await size_option.click(timeout=3000)
+            result = {"clicked": True}
+        except Exception:
+            # JS 폴백: 모든 visible li 요소에서 텍스트 매칭
+            result = await page.evaluate("""(targetSize) => {
+                const allLi = document.querySelectorAll('li');
+                const found = [];
+                for (const li of allLi) {
+                    const r = li.getBoundingClientRect();
+                    if (r.width > 0 && r.height > 0 && r.height < 50) {
+                        const text = li.textContent.trim();
+                        if (text === String(targetSize)) {
+                            li.click();
+                            return {clicked: true, text: text};
+                        }
+                        if (/^\\d+$/.test(text)) {
+                            found.push(text);
+                        }
+                    }
+                }
+                return {clicked: false, available: found};
+            }""", size)
 
         if result.get("clicked"):
             await asyncio.sleep(0.5)
             print(f"  🔤 글씨크기 {size} 설정 완료")
         else:
-            print(f"  [경고] 글씨크기 {size} 옵션을 찾을 수 없습니다 (항목 {result.get('itemCount', 0)}개)", file=sys.stderr)
+            available = result.get("available", [])
+            print(f"  [경고] 글씨크기 {size} 옵션 없음 (사용 가능: {available})", file=sys.stderr)
             await page.keyboard.press("Escape")
     except Exception as e:
         print(f"  [경고] 글씨크기 설정 실패: {e}", file=sys.stderr)
@@ -421,12 +423,14 @@ async def set_content_with_images(page, blocks: list[dict]) -> None:
     await body_area.first.click()
     await asyncio.sleep(ACTION_DELAY / 1000)
 
-    # 글씨크기 11 설정
-    await set_font_size(page, size=11)
-
+    font_size_set = False
     for block in blocks:
         if block["type"] == "text":
             await _type_text_block(page, block["content"])
+            # 첫 텍스트 블록 입력 후 글씨크기 설정 (SmartEditor ONE 최소: 13)
+            if not font_size_set:
+                await set_font_size(page, size=13)
+                font_size_set = True
             await page.keyboard.press("Enter")
             await asyncio.sleep(0.3)
         elif block["type"] == "separator":
