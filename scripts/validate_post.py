@@ -47,7 +47,18 @@ def validate_post(data: dict) -> list[dict]:
         "detail": f"현재 {sep_count}개" + ("" if sep_count >= 2 else " → 영업정보 뒤 + 최종평가 앞에 필요"),
     })
 
-    # 4. 영업정보 (두 번째 텍스트 블록에 "영업시간" 키워드)
+    # 4. 가게이름 (첫 번째 텍스트 블록이 짧은 텍스트 - 인용구로 렌더링됨)
+    has_short_name = False
+    if text_blocks:
+        first_text = text_blocks[0].get("content", "")
+        has_short_name = len(first_text) <= 30 and "\n" not in first_text
+    results.append({
+        "rule": "가게이름 (≤30자, 1줄)",
+        "pass": has_short_name,
+        "detail": f"'{text_blocks[0].get('content', '')[:20]}' ({len(text_blocks[0].get('content', ''))}자)" if text_blocks else "텍스트 블록 없음",
+    })
+
+    # 5. 영업정보 (두 번째 텍스트 블록에 "영업시간" 키워드)
     has_business_info = False
     if len(text_blocks) >= 2:
         second_text = text_blocks[1].get("content", "")

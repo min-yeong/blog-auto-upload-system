@@ -10,7 +10,6 @@
 
 import asyncio
 import json
-import os
 import sys
 from pathlib import Path
 
@@ -214,10 +213,10 @@ async def _insert_separator(page) -> None:
 
 
 async def _insert_quotation_block(page, text: str) -> None:
-    """인용구(좌측 바) 블록 삽입 후 텍스트 입력.
+    """인용구(좌측 세로 바) 블록 삽입 후 텍스트 입력.
 
-    SmartEditor ONE 도큐먼트 툴바의 인용구 버튼을 클릭하여 인용구 컴포넌트를 삽입하고,
-    텍스트를 입력한 후 인용구 밖으로 커서를 이동.
+    1. 인용구 드롭다운에서 '버티컬 라인' 스타일 선택 (좌표 기반 클릭)
+    2. 텍스트 입력 후 인용구 밖으로 커서 이동
     """
     import pyperclip
 
@@ -234,14 +233,40 @@ async def _insert_quotation_block(page, text: str) -> None:
         return
 
     try:
-        await quote_btn.first.click()
-        await asyncio.sleep(1.5)
+        # 드롭다운 버튼으로 스타일 선택 팝업 열기
+        dropdown_btn = page.locator("li.se-toolbar-item-insert-quotation button.se-document-toolbar-select-option-button")
+        if await dropdown_btn.count() > 0:
+            await dropdown_btn.first.click()
+            await asyncio.sleep(1.5)
 
-        # 인용구 스타일 선택 팝업이 나타날 수 있음 → 첫 번째 스타일(좌측 바) 선택
-        style_item = page.locator("div.se-popup-content button:visible, div.se-select-option button:visible")
-        if await style_item.count() > 0:
-            await style_item.first.click()
-            await asyncio.sleep(0.5)
+            # 드롭다운 버튼 좌표 기준으로 "버티컬 라인" (2번째 옵션) 위치 클릭
+            # 팝업 구조: 따옴표(1번) → 버티컬 라인(2번) → 말풍선(3번) ...
+            # 각 옵션 높이 약 50px, 2번째 옵션은 버튼 아래 ~90px 위치
+            dd_box = await dropdown_btn.first.bounding_box()
+            if dd_box:
+                target_x = dd_box["x"] + 50  # 팝업 중앙쯤
+                target_y = dd_box["y"] + dd_box["height"] + 90  # 2번째 옵션 위치
+                await page.mouse.click(target_x, target_y)
+                await asyncio.sleep(1)
+                print(f"  인용구 스타일: 버티컬 라인 클릭 (좌표: {target_x:.0f}, {target_y:.0f})")
+            else:
+                # 좌표 못 가져오면 기본 버튼 폴백
+                await page.keyboard.press("Escape")
+                await asyncio.sleep(0.5)
+                await quote_btn.first.click()
+                await asyncio.sleep(1.5)
+                style_item = page.locator("div.se-popup-content button:visible")
+                if await style_item.count() > 0:
+                    await style_item.first.click()
+                    await asyncio.sleep(0.5)
+        else:
+            # 드롭다운 없으면 기본 버튼으로 삽입
+            await quote_btn.first.click()
+            await asyncio.sleep(1.5)
+            style_item = page.locator("div.se-popup-content button:visible")
+            if await style_item.count() > 0:
+                await style_item.first.click()
+                await asyncio.sleep(0.5)
 
         # 인용구 블록 안에 텍스트 입력
         pyperclip.copy(text)
@@ -287,9 +312,10 @@ async def _type_text_block(page, text: str) -> None:
         if para.strip():
             pyperclip.copy(para.strip())
             await page.keyboard.press("Meta+v")
+            await asyncio.sleep(0.3)  # 붙여넣기 완료 대기
         if i < len(paragraphs) - 1:
             await page.keyboard.press("Enter")
-        await asyncio.sleep(0.1)
+            await asyncio.sleep(0.2)  # Enter로 새 단락 생성 대기
     await asyncio.sleep(ACTION_DELAY / 1000)
 
 
@@ -305,9 +331,10 @@ async def _type_bullet_list(page, text: str) -> None:
     for i, line in enumerate(lines):
         pyperclip.copy(f"• {line}")
         await page.keyboard.press("Meta+v")
+        await asyncio.sleep(0.3)
         if i < len(lines) - 1:
             await page.keyboard.press("Enter")
-        await asyncio.sleep(0.1)
+            await asyncio.sleep(0.2)
 
     await asyncio.sleep(ACTION_DELAY / 1000)
     await page.keyboard.press("Enter")
@@ -500,46 +527,52 @@ async def set_content_with_images(page, blocks: list[dict], place: str = "") -> 
         ...
       ]
 
-    place: 장소 이름 (첫 번째 구분선 뒤에 네이버 지도 위젯 삽입)
-    """
-    # 본문 영역 클릭
-    body_area = page.locator("p.se-text-paragraph")
-    if await body_area.count() == 0:
-        body_area = page.locator("div.se-component.se-text")
-    if await body_area.count() == 0:
-        body_area = page.locator("span.se-placeholder")
+    place: 장소 이름 (맨 마지막에 네이버 지도 위젯 삽입)
 
-    await body_area.first.click()
+    블록 처리 순서:
+      1. 첫 번째 text → 인용구(버티컬 라인) 가게이름
+      2. 두 번째 text → bullet(•) 영업정보
+      3. separator → 구분선
+      4. 나머지 text/image → 본문 교차
+      5. separator → 구분선
+      6. 마지막 text → 총평
+      7. place → 네이버 지도 위젯 (맨 마지막)
+    """
+    # 본문 영역 클릭 (제목이 아닌 본문 영역을 정확히 클릭)
+    # span.se-placeholder("본문을 입력하세요")는 본문에만 존재하므로 가장 안전
+    placeholder = page.locator("span.se-placeholder")
+    if await placeholder.count() > 0:
+        await placeholder.first.click()
+        print("  본문 placeholder 클릭")
+    else:
+        # placeholder가 없으면 본문 텍스트 컴포넌트의 단락 클릭
+        body_paras = page.locator("div.se-component.se-text p.se-text-paragraph")
+        if await body_paras.count() > 0:
+            await body_paras.last.click()
+            print("  본문 단락(last) 클릭")
+        else:
+            # 최후 폴백
+            body_area = page.locator("p.se-text-paragraph").last
+            await body_area.click()
+            print("  단락(last) 폴백 클릭")
     await asyncio.sleep(ACTION_DELAY / 1000)
 
-    font_size_set = False
     text_block_index = 0
     separator_count = 0
 
     for block in blocks:
         if block["type"] == "text":
             if text_block_index == 0:
-                # 첫 번째 텍스트: 일반 텍스트 (식당 소개)
-                await _type_text_block(page, block["content"])
-                if not font_size_set:
-                    await set_font_size(page, size=13)
-                    font_size_set = True
-                await page.keyboard.press("Enter")
-                await asyncio.sleep(0.3)
+                # 첫 번째 텍스트: 인용구(좌측 세로 바) + 가게이름
+                await _insert_quotation_block(page, block["content"])
 
             elif text_block_index == 1:
                 # 두 번째 텍스트 (영업정보): 목록(bullet) 형식
                 await _type_bullet_list(page, block["content"])
-                if not font_size_set:
-                    await set_font_size(page, size=13)
-                    font_size_set = True
 
             else:
                 # 나머지: 일반 텍스트
                 await _type_text_block(page, block["content"])
-                if not font_size_set:
-                    await set_font_size(page, size=13)
-                    font_size_set = True
                 await page.keyboard.press("Enter")
                 await asyncio.sleep(0.3)
 
@@ -547,10 +580,6 @@ async def set_content_with_images(page, blocks: list[dict], place: str = "") -> 
         elif block["type"] == "separator":
             await _insert_separator(page)
             separator_count += 1
-            # 첫 번째 구분선 뒤에 장소(네이버 지도) 위젯 삽입
-            if separator_count == 1 and place:
-                print("  장소 삽입...")
-                await insert_place_widget(page, place)
             await asyncio.sleep(0.3)
         elif block["type"] == "image":
             paths = block.get("paths", [])
@@ -568,6 +597,14 @@ async def set_content_with_images(page, blocks: list[dict], place: str = "") -> 
                 for img_path in valid_paths:
                     await _insert_image_block(page, img_path)
             await asyncio.sleep(0.5)
+
+    # 모든 블록 입력 후 글씨크기 설정 (블록 입력 중간에 하면 커서가 이동됨)
+    await set_font_size(page, size=13)
+
+    # 장소(네이버 지도) 위젯을 맨 마지막에 삽입
+    if place:
+        print("  장소 삽입 (맨 마지막)...")
+        await insert_place_widget(page, place)
 
 
 async def upload_images(page, image_paths: list[str]) -> None:
@@ -849,7 +886,7 @@ async def upload_post(
             print("  제목 입력...")
             await set_title(page, title)
 
-            # 3. 본문 + 이미지 입력 (장소 위젯은 첫 구분선 뒤에 삽입)
+            # 3. 본문 + 이미지 입력 (장소 위젯은 맨 마지막에 삽입)
             if blocks:
                 print("  본문+이미지 교차 입력...")
                 await set_content_with_images(page, blocks, place=place)
@@ -956,84 +993,12 @@ async def test_upload():
             else:
                 print("\n⚠️  일부 셀렉터를 찾지 못했습니다")
 
-            # 임시저장 팝업 닫기 (본문 클릭 전)
+            # 임시저장 팝업 닫기
             cancel_btn = page.locator("div.se-popup-alert-confirm button:has-text('취소')")
             if await cancel_btn.count() > 0:
                 await cancel_btn.first.click()
                 await asyncio.sleep(1)
                 print("  이전 임시저장 무시 (새 글 작성)")
-
-            # 본문(제목 아닌 본문) 클릭 후 텍스트 프로퍼티 툴바 셀렉터 재확인
-            print("\n--- 본문 클릭 후 셀렉터 재확인 ---")
-            # 제목이 아닌 본문 텍스트 영역을 정확히 클릭
-            body_area = page.locator("div.se-component.se-text p.se-text-paragraph")
-            if await body_area.count() == 0:
-                body_area = page.locator("span.se-placeholder")
-            if await body_area.count() > 0:
-                await body_area.last.click()
-                await asyncio.sleep(1)
-                # 본문에 텍스트 입력 (텍스트 프로퍼티 툴바 활성화)
-                import pyperclip
-                pyperclip.copy("테스트")
-                await page.keyboard.press("Meta+v")
-                await asyncio.sleep(2)
-
-                font_btn = page.locator("button.se-font-size-code-toolbar-button")
-                font_count = await font_btn.count()
-                if font_count > 0:
-                    font_text = await font_btn.first.text_content()
-                    print(f"  ✅ 글씨크기 버튼 (본문 클릭 후): {font_count}개 (현재값: {font_text.strip()[:10]})")
-                else:
-                    print(f"  ❌ 글씨크기 버튼 (본문 클릭 후): 없음")
-
-                # 텍스트 프로퍼티 툴바 내 모든 버튼 탐색 (목록 버튼 찾기)
-                print("\n--- 텍스트 프로퍼티 툴바 버튼 탐색 ---")
-                toolbar_btns = await page.evaluate("""() => {
-                    const results = [];
-                    // 방법 1: font-size 버튼의 부모 툴바에서 형제 버튼 탐색
-                    const fontBtn = document.querySelector('button.se-font-size-code-toolbar-button');
-                    if (fontBtn) {
-                        let toolbar = fontBtn.closest('[class*=toolbar]');
-                        if (toolbar) {
-                            const btns = toolbar.querySelectorAll('button');
-                            for (const btn of btns) {
-                                const name = btn.getAttribute('data-name') || '';
-                                const cls = btn.className || '';
-                                const text = btn.textContent.trim().substring(0, 20);
-                                results.push({name, cls: cls.substring(0, 80), text});
-                            }
-                        }
-                    }
-                    // 방법 2: 모든 visible 버튼 중 list/목록 관련
-                    const allBtns = document.querySelectorAll('button');
-                    const listRelated = [];
-                    for (const btn of allBtns) {
-                        const name = (btn.getAttribute('data-name') || '').toLowerCase();
-                        const cls = (btn.className || '').toLowerCase();
-                        const text = (btn.textContent || '').toLowerCase();
-                        const combined = name + ' ' + cls + ' ' + text;
-                        if (combined.includes('list') || combined.includes('목록') || combined.includes('글머리')) {
-                            const r = btn.getBoundingClientRect();
-                            listRelated.push({
-                                name: btn.getAttribute('data-name') || '',
-                                cls: (btn.className || '').substring(0, 80),
-                                text: btn.textContent.trim().substring(0, 30),
-                                visible: r.width > 0 && r.height > 0,
-                                y: Math.round(r.y)
-                            });
-                        }
-                    }
-                    return {toolbar_buttons: results, list_related: listRelated};
-                }""")
-
-                print(f"  텍스트 툴바 버튼 ({len(toolbar_btns.get('toolbar_buttons', []))}개):")
-                for btn in toolbar_btns.get("toolbar_buttons", []):
-                    print(f"    data-name='{btn['name']}' text='{btn['text']}' cls='{btn['cls'][:50]}'")
-
-                print(f"\n  목록 관련 버튼 ({len(toolbar_btns.get('list_related', []))}개):")
-                for btn in toolbar_btns.get("list_related", []):
-                    marker = "✅" if btn["visible"] else "❌"
-                    print(f"    {marker} data-name='{btn['name']}' text='{btn['text']}' visible={btn['visible']} y={btn['y']}")
 
         finally:
             await context.close()
