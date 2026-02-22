@@ -376,20 +376,33 @@ async def insert_place_widget(page, place_name: str) -> None:
             await _close_place_popup(page)
             return
 
-        await search_input.first.fill(place_name)
-        await asyncio.sleep(0.5)
-        await page.keyboard.press("Enter")
-        await asyncio.sleep(4)
+        # 검색어 시도 목록: 원본 → 첫 단어(브랜드명)만
+        search_terms = [place_name]
+        first_word = place_name.split()[0] if " " in place_name else None
+        if first_word and first_word != place_name:
+            search_terms.append(first_word)
 
-        # 검색 결과 항목에 hover → "추가" 버튼이 나타남 → 클릭
         clicked = False
+        item_rect = None
 
-        item_rect = await page.evaluate("""() => {
-            const item = document.querySelector('li.se-place-map-search-result-item');
-            if (!item) return null;
-            const r = item.getBoundingClientRect();
-            return r.width > 0 ? {x: r.x, y: r.y, w: r.width, h: r.height} : null;
-        }""")
+        for search_term in search_terms:
+            await search_input.first.fill(search_term)
+            await asyncio.sleep(0.5)
+            await page.keyboard.press("Enter")
+            await asyncio.sleep(5)
+
+            item_rect = await page.evaluate("""() => {
+                const item = document.querySelector('li.se-place-map-search-result-item');
+                if (!item) return null;
+                const r = item.getBoundingClientRect();
+                return r.width > 0 ? {x: r.x, y: r.y, w: r.width, h: r.height} : null;
+            }""")
+
+            if item_rect:
+                print(f"  🔍 장소 검색 성공: {search_term}")
+                break
+            else:
+                print(f"  🔍 '{search_term}' 검색 결과 없음, 재시도...")
 
         if item_rect:
             # 1단계: 결과 항목 위로 마우스 이동 (hover)
@@ -668,17 +681,31 @@ async def set_category(page, category_name: str) -> None:
 
 
 async def set_tags(page, tags: list[str]) -> None:
-    """태그 입력."""
+    """태그 입력 (에디터 하단 태그 영역)."""
     if not tags:
         return
 
-    tag_input = page.locator("input.publish_tag__input")
-    if await tag_input.count() == 0:
-        tag_input = page.locator("input[placeholder*='태그']")
-    if await tag_input.count() == 0:
-        tag_input = page.locator("div.tag input")
+    # 에디터 하단 태그 영역으로 스크롤
+    await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+    await asyncio.sleep(1)
 
-    if await tag_input.count() > 0:
+    # 에디터 하단 태그 입력란 셀렉터 (우선순위순)
+    selectors = [
+        "input.publish_tag__input",
+        "input[placeholder*='태그']",
+        "div.tag input",
+        "input.se-tag-input",
+        "div.se-tag-content input",
+    ]
+
+    tag_input = None
+    for sel in selectors:
+        loc = page.locator(sel)
+        if await loc.count() > 0:
+            tag_input = loc
+            break
+
+    if tag_input and await tag_input.count() > 0:
         for tag in tags:
             await tag_input.first.fill(tag)
             await page.keyboard.press("Enter")
@@ -908,11 +935,9 @@ async def upload_post(
             if thumbnail and blocks:
                 await set_thumbnail(page, thumbnail, blocks)
 
-            # 7. 태그 입력 (발행 모드에서만 시도 - 임시저장 시 태그 패널 접근 불가)
-            if tags and do_publish:
+            # 7. 태그 입력 (임시저장/발행 모두 시도)
+            if tags:
                 await set_tags(page, tags)
-            elif tags:
-                print("  ℹ️ 임시저장 모드 - 태그는 발행 시 또는 수동으로 추가해주세요")
 
             # 8. 저장/발행
             if do_publish:
