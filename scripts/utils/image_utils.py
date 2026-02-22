@@ -62,6 +62,25 @@ def prepare_image(image_path: str, output_dir: str | None = None) -> str:
     return resize_image(image_path)
 
 
+def fix_exif_orientation(image_path: str, output_path: str) -> str:
+    """EXIF 회전 정보를 적용하여 이미지를 올바른 방향으로 저장.
+
+    개별 이미지 업로드 시 에디터가 EXIF를 무시하는 경우에 사용.
+
+    Args:
+        image_path: 원본 이미지 경로
+        output_path: 저장 경로
+
+    Returns:
+        저장된 파일 경로
+    """
+    img = Image.open(image_path)
+    img = ImageOps.exif_transpose(img)
+    img = img.convert("RGB")
+    img.save(output_path, "JPEG", quality=JPEG_QUALITY)
+    return output_path
+
+
 def stitch_images_horizontally(
     image_paths: list[str],
     output_path: str,

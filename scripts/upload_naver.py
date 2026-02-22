@@ -19,7 +19,7 @@ from playwright.async_api import async_playwright
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from scripts.utils.naver_auth import ensure_login, BLOG_ID, NAVER_ID, NAVER_PW
-from scripts.utils.image_utils import stitch_images_horizontally, mosaic_faces_in_paths
+from scripts.utils.image_utils import stitch_images_horizontally, mosaic_faces_in_paths, fix_exif_orientation
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 EDITOR_URL = f"https://blog.naver.com/{BLOG_ID}/postwrite"
@@ -603,7 +603,7 @@ async def set_content_with_images(page, blocks: list[dict], place: str = "", tag
             # 얼굴 모자이크 처리
             mosaic_dir = str(PROJECT_ROOT / "output" / "mosaic")
             valid_paths = mosaic_faces_in_paths(valid_paths, mosaic_dir)
-            # 대표이미지가 포함된 블록은 합치지 않고 개별 업로드
+            # 대표이미지가 포함된 블록은 합치지 않고 개별 업로드 (EXIF 회전 적용)
             contains_thumbnail = thumbnail and thumbnail in paths
             if len(valid_paths) >= 2 and not contains_thumbnail:
                 # 2장 이상이면 가로로 합쳐서 한 장으로 업로드
@@ -613,7 +613,10 @@ async def set_content_with_images(page, blocks: list[dict], place: str = "", tag
                 print(f"  🔗 이미지 {len(valid_paths)}장 합침")
             else:
                 for img_path in valid_paths:
-                    await _insert_image_block(page, img_path)
+                    # EXIF 회전 적용하여 올바른 방향으로 업로드
+                    fixed_path = str(PROJECT_ROOT / "output" / f"fixed_{Path(img_path).name}")
+                    fix_exif_orientation(img_path, fixed_path)
+                    await _insert_image_block(page, fixed_path)
             await asyncio.sleep(0.5)
 
     # 모든 블록 입력 후 글씨크기 설정 (블록 입력 중간에 하면 커서가 이동됨)
@@ -774,6 +777,14 @@ async def set_thumbnail(page, thumbnail: str, blocks: list[dict]) -> None:
     try:
         target_img = img_elements.nth(img_index)
 
+        # 이미지가 뷰포트에 보이도록 스크롤 + 클릭하여 포커스
+        await target_img.scroll_into_view_if_needed()
+        await asyncio.sleep(0.5)
+        box = await target_img.bounding_box()
+        if box:
+            await page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+            await asyncio.sleep(1)
+
         # 방법: 각 이미지 컴포넌트 내부에 있는 se-set-rep-image-button을 직접 JS로 클릭
         # (DOM에는 존재하지만 display:none 상태 → 강제로 클릭 핸들러 트리거)
         result = await page.evaluate("""(idx) => {
@@ -799,7 +810,7 @@ async def set_thumbnail(page, thumbnail: str, blocks: list[dict]) -> None:
         elif result.get("already"):
             print(f"  🖼️ 이미 대표이미지로 설정되어 있음: {Path(thumbnail).name}")
         else:
-            # 폴백: 이미지 직접 클릭 후 대표 버튼 찾기
+            # 폴백: 이미지 더블클릭 후 대표 버튼 찾기
             await page.keyboard.press("Escape")
             await asyncio.sleep(0.5)
 
@@ -808,27 +819,33 @@ async def set_thumbnail(page, thumbnail: str, blocks: list[dict]) -> None:
 
             box = await target_img.bounding_box()
             if box:
-                await page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+                # 더블클릭으로 이미지 선택 모드 활성화
+                await page.mouse.dblclick(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
                 await asyncio.sleep(2)
 
-                repr_rect = await page.evaluate("""() => {
+                # 대표 버튼 찾기 (여러 셀렉터 시도)
+                repr_result = await page.evaluate("""(idx) => {
+                    // 방법1: 컴포넌트 내 버튼 재탐색
+                    const comps = document.querySelectorAll('div.se-component.se-image');
+                    if (comps[idx]) {
+                        const btn = comps[idx].querySelector('[class*="rep-image"], [class*="represent"]');
+                        if (btn) { btn.click(); return {clicked: true, method: 'selector'}; }
+                    }
+                    // 방법2: 화면에 보이는 대표 관련 버튼
                     const buttons = document.querySelectorAll('button');
                     for (const btn of buttons) {
                         if (btn.textContent.includes('대표') && !btn.classList.contains('se-is-selected')) {
                             const r = btn.getBoundingClientRect();
                             if (r.width > 0 && r.y > 0 && r.y < window.innerHeight) {
-                                return {x: r.x, y: r.y, w: r.width, h: r.height};
+                                btn.click();
+                                return {clicked: true, method: 'text'};
                             }
                         }
                     }
                     return null;
-                }""")
+                }""", img_index)
 
-                if repr_rect:
-                    await page.mouse.click(
-                        repr_rect["x"] + repr_rect["w"] / 2,
-                        repr_rect["y"] + repr_rect["h"] / 2,
-                    )
+                if repr_result and repr_result.get("clicked"):
                     await asyncio.sleep(1)
                     print(f"  🖼️ 대표이미지 설정 완료 (폴백): {Path(thumbnail).name}")
                 else:
