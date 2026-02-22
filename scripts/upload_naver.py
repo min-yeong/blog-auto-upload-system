@@ -320,6 +320,77 @@ async def _type_text_block(page, text: str) -> None:
             await page.keyboard.press("Enter")
             await asyncio.sleep(0.2)  # Enter로 새 단락 생성 대기
     await asyncio.sleep(ACTION_DELAY / 1000)
+    print(f"  📝 텍스트 입력 ({len(text)}자)")
+
+
+async def _move_cursor_after_last_image(page) -> None:
+    """이미지 삽입 후 다음 텍스트 입력 영역으로 커서 이동.
+
+    SmartEditor ONE에서 이미지 삽입 후 에디터 포커스가 사라질 수 있음.
+    마지막 이미지 다음의 텍스트 단락을 찾아 클릭하여 포커스 복원.
+    """
+    moved = await page.evaluate("""() => {
+        const images = document.querySelectorAll('div.se-component.se-image');
+        if (images.length === 0) return false;
+        const lastImg = images[images.length - 1];
+
+        // 이미지 다음 형제 요소에서 텍스트 단락 찾기
+        let sibling = lastImg.nextElementSibling;
+        while (sibling) {
+            const p = sibling.querySelector('p.se-text-paragraph');
+            if (p) {
+                p.focus();
+                p.click();
+                // 커서를 끝으로 이동
+                const range = document.createRange();
+                range.selectNodeContents(p);
+                range.collapse(false);
+                const sel = window.getSelection();
+                sel.removeAllRanges();
+                sel.addRange(range);
+                return true;
+            }
+            sibling = sibling.nextElementSibling;
+        }
+
+        // 이미지 뒤에 텍스트가 없으면 마지막 단락 사용
+        const paras = document.querySelectorAll('p.se-text-paragraph');
+        if (paras.length > 0) {
+            const lastPara = paras[paras.length - 1];
+            lastPara.focus();
+            lastPara.click();
+            return true;
+        }
+        return false;
+    }""")
+    await asyncio.sleep(0.3)
+
+    if not moved:
+        # 폴백: 키보드로 이동
+        await page.keyboard.press("Escape")
+        await asyncio.sleep(0.2)
+        await page.keyboard.press("ArrowDown")
+        await asyncio.sleep(0.2)
+
+
+async def _apply_center_alignment(page) -> None:
+    """본문 텍스트를 가운데 정렬 (JS로 직접 설정).
+
+    주의: Meta+a(전체선택)는 절대 사용하지 않음!
+    SmartEditor ONE에서 전체선택 후 다른 동작 시 내용이 삭제될 수 있음.
+    대신 JS로 각 단락의 text-align을 직접 center로 설정.
+    """
+    count = await page.evaluate("""() => {
+        const paras = document.querySelectorAll('p.se-text-paragraph');
+        let count = 0;
+        for (const p of paras) {
+            p.style.textAlign = 'center';
+            count++;
+        }
+        return count;
+    }""")
+    if count > 0:
+        print(f"  📐 가운데 정렬 적용 (JS, {count}개 단락)")
 
 
 async def _type_bullet_list(page, text: str) -> None:
@@ -531,7 +602,7 @@ async def _insert_image_block(page, img_path: str) -> None:
     print(f"  📸 {Path(img_path).name}")
 
 
-async def set_content_with_images(page, blocks: list[dict], place: str = "", tags: list[str] | None = None, thumbnail: str = "") -> None:
+async def set_content_with_images(page, blocks: list[dict], place: str = "", tags: list[str] | None = None, thumbnail: str = "", align_center: bool = False) -> None:
     """텍스트와 이미지를 교차 입력.
 
     blocks 형식:
@@ -627,9 +698,15 @@ async def set_content_with_images(page, blocks: list[dict], place: str = "", tag
                         img.convert("RGB").save(fixed_path, "JPEG", quality=85)
                     await _insert_image_block(page, fixed_path)
             await asyncio.sleep(0.5)
+            # 이미지 삽입 후 텍스트 영역으로 커서 복원 (image→text 순서 지원)
+            await _move_cursor_after_last_image(page)
 
     # 모든 블록 입력 후 글씨크기 설정 (블록 입력 중간에 하면 커서가 이동됨)
     await set_font_size(page, size=13)
+
+    # 가운데 정렬 적용
+    if align_center:
+        await _apply_center_alignment(page)
 
     # 장소(네이버 지도) 위젯 삽입
     if place:
@@ -930,6 +1007,7 @@ async def upload_post(
     blocks: list[dict] | None = None,
     thumbnail: str = "",
     place: str = "",
+    align: str = "",
     do_publish: bool = False,
     headless: bool = False,
 ) -> bool:
@@ -944,6 +1022,7 @@ async def upload_post(
         blocks: 텍스트/이미지 교차 블록 리스트 (있으면 content/images 무시)
         thumbnail: 대표이미지 경로 (본문 내 이미지 중 선택)
         place: 장소 이름 (네이버 지도 와이드형 위젯 삽입)
+        align: 텍스트 정렬 ("center"이면 가운데 정렬)
         do_publish: True면 발행, False면 임시저장 (기본)
         headless: 헤드리스 모드
 
@@ -970,7 +1049,7 @@ async def upload_post(
             # 3. 본문 + 이미지 입력 (장소 위젯은 맨 마지막에 삽입)
             if blocks:
                 print("  본문+이미지 교차 입력...")
-                await set_content_with_images(page, blocks, place=place, tags=tags, thumbnail=thumbnail)
+                await set_content_with_images(page, blocks, place=place, tags=tags, thumbnail=thumbnail, align_center=(align == "center"))
             else:
                 print("  본문 입력...")
                 await set_content(page, content)
@@ -1111,6 +1190,7 @@ def main():
         blocks = data.get("blocks", None)
         thumbnail = data.get("thumbnail", "")
         place = data.get("place", "")
+        align = data.get("align", "")
     else:
         title = args.title
         content = args.content
@@ -1120,6 +1200,7 @@ def main():
         blocks = None
         thumbnail = ""
         place = ""
+        align = ""
 
     success = asyncio.run(upload_post(
         title=title,
@@ -1130,6 +1211,7 @@ def main():
         blocks=blocks,
         thumbnail=thumbnail,
         place=place,
+        align=align,
         do_publish=args.publish,
     ))
 
