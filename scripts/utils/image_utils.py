@@ -62,10 +62,12 @@ def prepare_image(image_path: str, output_dir: str | None = None) -> str:
     return resize_image(image_path)
 
 
-def fix_exif_orientation(image_path: str, output_path: str) -> str:
-    """EXIF 회전 정보를 적용하여 이미지를 올바른 방향으로 저장.
+def strip_exif_orientation(image_path: str, output_path: str) -> str:
+    """EXIF 회전 태그를 제거하여 원본 방향(가로) 그대로 저장.
 
-    개별 이미지 업로드 시 에디터가 EXIF를 무시하는 경우에 사용.
+    카메라가 세로로 찍었다고 판단해 EXIF Orientation을 설정하지만,
+    실제로는 가로 방향이 자연스러운 경우에 사용.
+    EXIF 태그만 제거하고 이미지 데이터는 회전하지 않음.
 
     Args:
         image_path: 원본 이미지 경로
@@ -75,8 +77,8 @@ def fix_exif_orientation(image_path: str, output_path: str) -> str:
         저장된 파일 경로
     """
     img = Image.open(image_path)
-    img = ImageOps.exif_transpose(img)
     img = img.convert("RGB")
+    # EXIF 없이 저장 → 뷰어/에디터가 회전하지 않음 → 원본 가로 유지
     img.save(output_path, "JPEG", quality=JPEG_QUALITY)
     return output_path
 

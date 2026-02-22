@@ -19,7 +19,7 @@ from playwright.async_api import async_playwright
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from scripts.utils.naver_auth import ensure_login, BLOG_ID, NAVER_ID, NAVER_PW
-from scripts.utils.image_utils import stitch_images_horizontally, mosaic_faces_in_paths, fix_exif_orientation
+from scripts.utils.image_utils import stitch_images_horizontally, mosaic_faces_in_paths, strip_exif_orientation
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 EDITOR_URL = f"https://blog.naver.com/{BLOG_ID}/postwrite"
@@ -613,9 +613,18 @@ async def set_content_with_images(page, blocks: list[dict], place: str = "", tag
                 print(f"  🔗 이미지 {len(valid_paths)}장 합침")
             else:
                 for img_path in valid_paths:
-                    # EXIF 회전 적용하여 올바른 방향으로 업로드
                     fixed_path = str(PROJECT_ROOT / "output" / f"fixed_{Path(img_path).name}")
-                    fix_exif_orientation(img_path, fixed_path)
+                    # 원본 경로 기준으로 thumbnail 여부 판단
+                    orig_path = next((p for p in paths if Path(p).name == Path(img_path).name), img_path)
+                    if orig_path == thumbnail:
+                        # 대표이미지: EXIF 제거 → 원본 가로 유지 (썸네일에 적합)
+                        strip_exif_orientation(img_path, fixed_path)
+                    else:
+                        # 일반 이미지: EXIF 적용 → 올바른 방향으로 표시
+                        from PIL import Image, ImageOps
+                        img = Image.open(img_path)
+                        img = ImageOps.exif_transpose(img)
+                        img.convert("RGB").save(fixed_path, "JPEG", quality=85)
                     await _insert_image_block(page, fixed_path)
             await asyncio.sleep(0.5)
 
@@ -791,15 +800,28 @@ async def set_thumbnail(page, thumbnail: str, blocks: list[dict]) -> None:
             const comps = document.querySelectorAll('div.se-component.se-image');
             if (!comps[idx]) return {error: 'component not found', count: comps.length};
 
-            const btn = comps[idx].querySelector('button.se-set-rep-image-button');
-            if (!btn) return {error: 'rep button not found in component'};
+            // 디버그: 컴포넌트 내 모든 버튼 확인
+            const allBtns = comps[idx].querySelectorAll('button');
+            const btnInfo = Array.from(allBtns).map(b => ({
+                cls: b.className,
+                text: b.textContent.trim().slice(0, 30)
+            }));
 
-            // 이미 대표로 설정된 경우 스킵
+            const btn = comps[idx].querySelector('button.se-set-rep-image-button');
+            if (!btn) {
+                // 대안: 클래스명에 'rep' 포함하는 버튼 찾기
+                const altBtn = comps[idx].querySelector('[class*="rep-image"], [class*="represent"]');
+                if (altBtn) {
+                    altBtn.click();
+                    return {clicked: true, method: 'alt-selector', btnClass: altBtn.className};
+                }
+                return {error: 'rep button not found', buttons: btnInfo, compClass: comps[idx].className};
+            }
+
             if (btn.classList.contains('se-is-selected')) {
                 return {already: true};
             }
 
-            // 버튼 클릭 (hidden이어도 click 이벤트는 전달됨)
             btn.click();
             return {clicked: true, btnClass: btn.className};
         }""", img_index)
