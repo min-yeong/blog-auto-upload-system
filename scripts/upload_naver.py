@@ -614,7 +614,15 @@ async def set_content_with_images(page, blocks: list[dict], place: str = "", tag
                     await _insert_image_block(page, img_path)
             await asyncio.sleep(0.5)
 
-    # 태그를 본문 마지막에 #태그 형식으로 삽입
+    # 모든 블록 입력 후 글씨크기 설정 (블록 입력 중간에 하면 커서가 이동됨)
+    await set_font_size(page, size=13)
+
+    # 장소(네이버 지도) 위젯 삽입
+    if place:
+        print("  장소 삽입...")
+        await insert_place_widget(page, place)
+
+    # 태그를 장소 위젯 아래에 #태그 형식으로 삽입
     if tags:
         tag_text = " ".join(f"#{t}" for t in tags)
         await page.keyboard.press("Enter")
@@ -623,14 +631,6 @@ async def set_content_with_images(page, blocks: list[dict], place: str = "", tag
         await asyncio.sleep(0.3)
         await _type_text_block(page, tag_text)
         print(f"  🏷️ 태그 {len(tags)}개 본문에 삽입")
-
-    # 모든 블록 입력 후 글씨크기 설정 (블록 입력 중간에 하면 커서가 이동됨)
-    await set_font_size(page, size=13)
-
-    # 장소(네이버 지도) 위젯을 맨 마지막에 삽입
-    if place:
-        print("  장소 삽입 (맨 마지막)...")
-        await insert_place_widget(page, place)
 
 
 async def upload_images(page, image_paths: list[str]) -> None:
