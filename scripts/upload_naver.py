@@ -531,7 +531,7 @@ async def _insert_image_block(page, img_path: str) -> None:
     print(f"  📸 {Path(img_path).name}")
 
 
-async def set_content_with_images(page, blocks: list[dict], place: str = "", tags: list[str] | None = None) -> None:
+async def set_content_with_images(page, blocks: list[dict], place: str = "", tags: list[str] | None = None, thumbnail: str = "") -> None:
     """텍스트와 이미지를 교차 입력.
 
     blocks 형식:
@@ -603,7 +603,9 @@ async def set_content_with_images(page, blocks: list[dict], place: str = "", tag
             # 얼굴 모자이크 처리
             mosaic_dir = str(PROJECT_ROOT / "output" / "mosaic")
             valid_paths = mosaic_faces_in_paths(valid_paths, mosaic_dir)
-            if len(valid_paths) >= 2:
+            # 대표이미지가 포함된 블록은 합치지 않고 개별 업로드
+            contains_thumbnail = thumbnail and thumbnail in paths
+            if len(valid_paths) >= 2 and not contains_thumbnail:
                 # 2장 이상이면 가로로 합쳐서 한 장으로 업로드
                 combined_path = str(PROJECT_ROOT / "output" / f"combined_{id(block)}.jpeg")
                 stitch_images_horizontally(valid_paths, combined_path)
@@ -735,18 +737,18 @@ async def set_thumbnail(page, thumbnail: str, blocks: list[dict]) -> None:
         return
 
     # thumbnail이 blocks에서 몇 번째 이미지인지 찾기
+    # 대표이미지가 포함된 블록은 합치지 않고 개별 업로드됨
     img_index = 0
     found = False
     for block in blocks:
         if block["type"] == "image":
             paths = block.get("paths", [])
-            if len(paths) >= 2:
+            contains_thumb = thumbnail in paths
+            if len(paths) >= 2 and not contains_thumb:
                 # 합쳐진 이미지는 1장으로 카운트
-                if thumbnail in paths:
-                    found = True
-                    break
                 img_index += 1
             else:
+                # 개별 업로드된 이미지는 각각 카운트
                 for p in paths:
                     if p == thumbnail:
                         found = True
@@ -929,7 +931,7 @@ async def upload_post(
             # 3. 본문 + 이미지 입력 (장소 위젯은 맨 마지막에 삽입)
             if blocks:
                 print("  본문+이미지 교차 입력...")
-                await set_content_with_images(page, blocks, place=place, tags=tags)
+                await set_content_with_images(page, blocks, place=place, tags=tags, thumbnail=thumbnail)
             else:
                 print("  본문 입력...")
                 await set_content(page, content)

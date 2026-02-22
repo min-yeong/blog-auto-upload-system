@@ -131,30 +131,34 @@ _EXTRACT_JS = """() => {
         if (!/^영업시간/.test(lines[i])) continue;
         const hourLines = [];
         const closedLines = [];
-        for (let j = i + 1; j < Math.min(i + 20, lines.length); j++) {
+        for (let j = i + 1; j < Math.min(i + 50, lines.length); j++) {
             const n = lines[j];
-            if (/펼쳐보기|접기|더보기|^전화번호|^편의|^홈페이지|^안내$/.test(n)) continue;
+            if (/접기|더보기|영업시간\\s*수정/.test(n)) continue;
+            if (/^전화번호|^편의|^홈페이지|^안내$|^복사$/.test(n)) break;
             if (/휴무/.test(n)) {
                 closedLines.push(n);
             } else if (/\\d{1,2}:\\d{2}/.test(n) ||
                        /^(매일|월|화|수|목|금|토|일|월요일|화요일|수요일|목요일|금요일|토요일|일요일|오늘)/.test(n)) {
                 hourLines.push(n);
-            } else if (hourLines.length > 0 || closedLines.length > 0) {
-                break;
             }
         }
         if (hourLines.length) {
-            // "오늘 휴무" 같은 임시 상태는 제외하고 실제 시간만
             const realHours = hourLines.filter(h => /\\d{1,2}:\\d{2}/.test(h));
             const statusLines = hourLines.filter(h => !/\\d{1,2}:\\d{2}/.test(h));
             if (realHours.length) {
-                info.hours = realHours[0];
-                if (realHours.length > 1) info.hours_detail = realHours.slice(1).join(' / ');
+                /* 중복 제거 후 대표 시간 + 부가 정보 */
+                const unique = [...new Set(realHours)];
+                info.hours = unique[0];
+                if (unique.length > 1) info.hours_detail = unique.slice(1).join(' / ');
             } else if (statusLines.length) {
                 info.hours = statusLines[0];
             }
         }
-        if (closedLines.length) info.closed_days = closedLines[0];
+        /* 휴무: "매주" 또는 "정기휴무" 우선, "오늘 휴무" 후순위 */
+        if (closedLines.length) {
+            const permanent = closedLines.find(l => /매주|정기/.test(l));
+            info.closed_days = permanent || closedLines[0];
+        }
         break;
     }
     if (!info.closed_days) {
@@ -186,6 +190,7 @@ _EXTRACT_JS = """() => {
         if (/^리뷰|^방문자\\s*리뷰|^AI\\s*브리핑|^이용약관|^메뉴\\s*항목/.test(lines[i])) break;
         if (/^메뉴판|^메뉴\\s*더보기|^더보기/.test(lines[i])) continue;
         if (/^\\d[\\d,]*\\s*원$/.test(lines[i])) continue;
+        if (/^사진$/.test(lines[i])) continue;
 
         const sameMatch = lines[i].match(/^(.+?)\\s+([\\d,]+)\\s*원$/);
         if (sameMatch) {
@@ -200,6 +205,13 @@ _EXTRACT_JS = """() => {
                 i++;
                 continue;
             }
+            /* 메뉴이름 → 사진 → 가격 패턴 (사진이 중간에 끼는 경우) */
+            if (i + 2 < lines.length && /^사진$/.test(lines[i + 1]) && /^[\\d,]+\\s*원$/.test(lines[i + 2])) {
+                const price = lines[i + 2].match(/^([\\d,]+)\\s*원$/)[1];
+                info.menu.push({ name: lines[i].trim(), price: price + '원' });
+                i += 2;
+                continue;
+            }
         }
     }
 
@@ -212,6 +224,23 @@ async def _expand_sections(page):
 
     주의: 메뉴 더보기는 페이지 네비게이션이 발생하므로 클릭하지 않는다.
     """
+    # JS로 직접 "펼쳐보기" 텍스트를 가진 버튼/링크를 찾아 클릭
+    clicked = await page.evaluate("""() => {
+        const allEls = document.querySelectorAll('button, a, span, [role="button"]');
+        for (const el of allEls) {
+            if (el.textContent.trim() === '펼쳐보기') {
+                el.click();
+                return true;
+            }
+        }
+        return false;
+    }""")
+    if clicked:
+        print("  [INFO] 펼쳐보기 클릭 성공", file=__import__('sys').stderr)
+        await page.wait_for_timeout(1500)
+        return
+
+    # 폴백: Playwright 셀렉터
     for selector in [
         'button:has-text("펼쳐보기")',
         'a:has-text("영업시간 더보기")',
@@ -220,8 +249,10 @@ async def _expand_sections(page):
         try:
             el = page.locator(selector).first
             if await el.count() > 0:
+                await el.scroll_into_view_if_needed(timeout=2000)
+                await page.wait_for_timeout(300)
                 await el.click(timeout=2000)
-                await page.wait_for_timeout(500)
+                await page.wait_for_timeout(1500)
                 break
         except Exception:
             pass
