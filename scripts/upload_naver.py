@@ -531,7 +531,7 @@ async def _insert_image_block(page, img_path: str) -> None:
     print(f"  📸 {Path(img_path).name}")
 
 
-async def set_content_with_images(page, blocks: list[dict], place: str = "") -> None:
+async def set_content_with_images(page, blocks: list[dict], place: str = "", tags: list[str] | None = None) -> None:
     """텍스트와 이미지를 교차 입력.
 
     blocks 형식:
@@ -613,6 +613,16 @@ async def set_content_with_images(page, blocks: list[dict], place: str = "") -> 
                 for img_path in valid_paths:
                     await _insert_image_block(page, img_path)
             await asyncio.sleep(0.5)
+
+    # 태그를 본문 마지막에 #태그 형식으로 삽입
+    if tags:
+        tag_text = " ".join(f"#{t}" for t in tags)
+        await page.keyboard.press("Enter")
+        await asyncio.sleep(0.3)
+        await page.keyboard.press("Enter")
+        await asyncio.sleep(0.3)
+        await _type_text_block(page, tag_text)
+        print(f"  🏷️ 태그 {len(tags)}개 본문에 삽입")
 
     # 모든 블록 입력 후 글씨크기 설정 (블록 입력 중간에 하면 커서가 이동됨)
     await set_font_size(page, size=13)
@@ -919,7 +929,7 @@ async def upload_post(
             # 3. 본문 + 이미지 입력 (장소 위젯은 맨 마지막에 삽입)
             if blocks:
                 print("  본문+이미지 교차 입력...")
-                await set_content_with_images(page, blocks, place=place)
+                await set_content_with_images(page, blocks, place=place, tags=tags)
             else:
                 print("  본문 입력...")
                 await set_content(page, content)
@@ -935,9 +945,7 @@ async def upload_post(
             if thumbnail and blocks:
                 await set_thumbnail(page, thumbnail, blocks)
 
-            # 7. 태그 입력 (임시저장/발행 모두 시도)
-            if tags:
-                await set_tags(page, tags)
+            # 7. 태그는 본문 마지막에 #태그 형식으로 이미 삽입됨 (set_content_with_images에서 처리)
 
             # 8. 저장/발행
             if do_publish:
