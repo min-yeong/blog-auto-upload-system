@@ -89,6 +89,9 @@ async def set_title(page, title: str) -> None:
     await page.keyboard.press("Meta+v")
     await asyncio.sleep(ACTION_DELAY / 1000)
 
+    # 클립보드 비우기 (이후 본문 작업에서 제목이 재붙여넣기되는 것 방지)
+    pyperclip.copy("")
+
 
 async def set_content(page, content: str) -> None:
     """본문 내용 입력."""
