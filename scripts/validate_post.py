@@ -81,16 +81,16 @@ def validate_post(data: dict) -> list[dict]:
         "detail": "마지막 텍스트 블록에 재방문/총평 내용 포함" if has_final_review else "마지막 텍스트 블록에 재방문/총평 관련 키워드 없음",
     })
 
-    # 6. 줄바꿈 (텍스트 블록 내 각 줄 평균 25자 이하 - 모바일 최적화 20-22자 기준)
+    # 6. 줄바꿈 (텍스트 블록 내 각 줄 평균 30자 이하 - 한 문장 한 줄, 평균 22자 내외)
     all_lines = []
     for b in text_blocks:
         lines = [l for l in b.get("content", "").split("\n") if l.strip()]
         all_lines.extend(lines)
     avg_line_len = sum(len(l) for l in all_lines) / max(len(all_lines), 1)
     results.append({
-        "rule": "줄바꿈 (평균 ≤25자/줄)",
-        "pass": avg_line_len <= 25,
-        "detail": f"평균 {avg_line_len:.1f}자/줄" + ("" if avg_line_len <= 25 else " → 모바일 최적화: 한 줄 20-22자로 줄바꿈 필요"),
+        "rule": "줄바꿈 (평균 ≤30자/줄)",
+        "pass": avg_line_len <= 30,
+        "detail": f"평균 {avg_line_len:.1f}자/줄" + ("" if avg_line_len <= 30 else " → 한 문장을 한 줄에 쓰고 평균 22자 내외로"),
     })
 
     # 7. 태그 (8개 이상)
