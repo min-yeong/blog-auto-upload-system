@@ -958,7 +958,38 @@ async def set_thumbnail(page, thumbnail: str, blocks: list[dict]) -> None:
 
 async def save_draft(page) -> bool:
     """임시저장."""
-    # 네이버 에디터 상단의 "저장" 버튼
+    # 도움말 팝업이 저장 버튼을 가릴 수 있으므로 JS로 제거
+    removed = await page.evaluate("""() => {
+        const el = document.querySelector('div.container__HW_tc');
+        if (el) { el.remove(); return true; }
+        const help = document.querySelector('h1.se-help-title');
+        if (help) {
+            let parent = help.closest('div[class*="container"]');
+            if (parent) { parent.remove(); return true; }
+        }
+        return false;
+    }""")
+    if removed:
+        await asyncio.sleep(0.3)
+        print("  📖 도움말 팝업 제거 완료")
+
+    # 네이버 에디터 상단의 "저장" 버튼 - JS click으로 오버레이 우회
+    clicked = await page.evaluate("""() => {
+        const btns = document.querySelectorAll('button');
+        for (const btn of btns) {
+            if (btn.textContent.trim() === '저장' || btn.textContent.includes('저장')) {
+                btn.click();
+                return true;
+            }
+        }
+        return false;
+    }""")
+    if clicked:
+        await asyncio.sleep(3)
+        print("  💾 임시저장 완료")
+        return True
+
+    # 폴백: Playwright click
     draft_btn = page.locator("button:has-text('저장')")
     if await draft_btn.count() == 0:
         draft_btn = page.locator("button:has-text('임시저장')")
@@ -966,7 +997,7 @@ async def save_draft(page) -> bool:
         draft_btn = page.locator("button.se-toolbar-button-save")
 
     if await draft_btn.count() > 0:
-        await draft_btn.first.click()
+        await draft_btn.first.click(force=True)
         await asyncio.sleep(3)
         print("  💾 임시저장 완료")
         return True
