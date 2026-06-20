@@ -19,7 +19,7 @@ from playwright.async_api import async_playwright
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from scripts.utils.naver_auth import ensure_login, BLOG_ID, NAVER_ID, NAVER_PW
-from scripts.utils.image_utils import stitch_images_horizontally, mosaic_faces_in_paths, strip_exif_orientation
+from scripts.utils.image_utils import stitch_images_horizontally, mosaic_faces_in_paths
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 EDITOR_URL = f"https://blog.naver.com/{BLOG_ID}/postwrite"
@@ -27,6 +27,21 @@ EDITOR_URL = f"https://blog.naver.com/{BLOG_ID}/postwrite"
 # SmartEditor ONE 타임아웃 (ms)
 EDITOR_LOAD_TIMEOUT = 20000
 ACTION_DELAY = 500  # 액션 간 딜레이 (ms)
+
+IMAGE_SELECTORS = [
+    "div.se-component.se-image",
+    "img.se-image-resource",
+    "div.se-module-image img",
+    "img[src*='postfiles']",
+    "img[src*='blogfiles']",
+]
+
+TEXT_SELECTORS = [
+    "div.se-title-text",
+    "div.se-component.se-quotation",
+    "p.se-text-paragraph",
+    "div.se-component.se-text",
+]
 
 
 async def _auto_login_if_needed(page) -> None:
@@ -447,11 +462,9 @@ async def insert_place_widget(page, place_name: str) -> None:
             await _close_place_popup(page)
             return
 
-        # 검색어 시도 목록: 원본 → 첫 단어(브랜드명)만
+        # 정확한 검색어로만 시도한다.
+        # 첫 단어 fallback은 엉뚱한 장소를 삽입할 수 있어 사용하지 않는다.
         search_terms = [place_name]
-        first_word = place_name.split()[0] if " " in place_name else None
-        if first_word and first_word != place_name:
-            search_terms.append(first_word)
 
         clicked = False
         item_rect = None
@@ -462,12 +475,24 @@ async def insert_place_widget(page, place_name: str) -> None:
             await page.keyboard.press("Enter")
             await asyncio.sleep(5)
 
-            item_rect = await page.evaluate("""() => {
+            item_info = await page.evaluate("""() => {
                 const item = document.querySelector('li.se-place-map-search-result-item');
                 if (!item) return null;
                 const r = item.getBoundingClientRect();
-                return r.width > 0 ? {x: r.x, y: r.y, w: r.width, h: r.height} : null;
+                return r.width > 0 ? {x: r.x, y: r.y, w: r.width, h: r.height, text: item.textContent.trim()} : null;
             }""")
+            item_rect = item_info
+
+            if item_info:
+                result_text = item_info.get("text", "")
+                required_terms = [t for t in place_name.split() if len(t) > 1]
+                missing_terms = [t for t in required_terms if t not in result_text]
+                if missing_terms:
+                    print(
+                        f"  🔍 장소 검색 결과 불일치: '{result_text}' "
+                        f"(누락: {', '.join(missing_terms)})"
+                    )
+                    item_rect = None
 
             if item_rect:
                 print(f"  🔍 장소 검색 성공: {search_term}")
@@ -574,8 +599,9 @@ async def _close_place_popup(page) -> None:
 async def _insert_image_block(page, img_path: str) -> None:
     """현재 커서 위치에 이미지 삽입."""
     if not Path(img_path).exists():
-        print(f"  [경고] 이미지 파일 없음: {img_path}", file=sys.stderr)
-        return
+        raise FileNotFoundError(f"이미지 파일 없음: {img_path}")
+
+    before_count = await _count_editor_images(page)
 
     # 툴바의 사진 버튼 클릭
     photo_btn = page.locator("button.se-image-toolbar-button")
@@ -585,21 +611,120 @@ async def _insert_image_block(page, img_path: str) -> None:
         # 상단 툴바의 "사진" 텍스트 포함 버튼
         photo_btn = page.locator("button:has-text('사진')")
 
-    if await photo_btn.count() > 0:
-        await photo_btn.first.click()
+    if await photo_btn.count() == 0:
+        raise RuntimeError("사진 업로드 버튼을 찾을 수 없습니다")
+
+    uploaded = await _set_image_file_from_toolbar(page, photo_btn.first, img_path)
+    if not uploaded:
+        raise RuntimeError(f"이미지 파일 선택 실패: {Path(img_path).name}")
+
+    insert_btn = page.locator("button.se-popup-button-confirm")
+    if await insert_btn.count() > 0 and await insert_btn.first.is_visible():
+        await insert_btn.first.click()
+        await asyncio.sleep(1)
+
+    after_count = await _wait_for_image_count_increase(page, before_count)
+    if after_count <= before_count:
+        raise RuntimeError(f"이미지 삽입 실패: {Path(img_path).name}")
+
+    print(f"  📸 {Path(img_path).name}")
+
+
+async def _set_image_file_from_toolbar(page, photo_btn, img_path: str) -> bool:
+    """사진 버튼에서 파일 선택 UI를 열고 이미지를 지정."""
+    try:
+        async with page.expect_file_chooser(timeout=5000) as fc_info:
+            await photo_btn.click()
+        file_chooser = await fc_info.value
+        await file_chooser.set_files(img_path)
+        return True
+    except Exception:
+        await photo_btn.click()
         await asyncio.sleep(1)
 
         file_input = page.locator("input[type='file']")
-        if await file_input.count() > 0:
-            await file_input.first.set_input_files(img_path)
-            await asyncio.sleep(3)
+        if await file_input.count() == 0:
+            return False
 
-            insert_btn = page.locator("button.se-popup-button-confirm")
-            if await insert_btn.count() > 0:
-                await insert_btn.first.click()
-                await asyncio.sleep(2)
+        await file_input.last.set_input_files(img_path)
+        return True
 
-    print(f"  📸 {Path(img_path).name}")
+
+async def _count_editor_images(page) -> int:
+    """현재 에디터 안에 삽입된 이미지 컴포넌트 수."""
+    return await page.evaluate("""(selectors) => {
+        const components = document.querySelectorAll('div.se-component.se-image');
+        if (components.length > 0) return components.length;
+
+        const srcs = new Set();
+        for (const sel of selectors) {
+            document.querySelectorAll(sel).forEach(el => {
+                if (el.src) srcs.add(el.src);
+            });
+        }
+        return srcs.size;
+    }""", IMAGE_SELECTORS)
+
+
+async def _wait_for_image_count_increase(page, before_count: int, timeout: int = 20000) -> int:
+    """이미지 업로드 후 에디터 이미지 개수가 늘어날 때까지 대기."""
+    try:
+        await page.wait_for_function(
+            """([selectors, before]) => {
+                const components = document.querySelectorAll('div.se-component.se-image');
+                if (components.length > before) return true;
+
+                const srcs = new Set();
+                for (const sel of selectors) {
+                    document.querySelectorAll(sel).forEach(el => {
+                        if (el.src) srcs.add(el.src);
+                    });
+                }
+                return srcs.size > before;
+            }""",
+            [IMAGE_SELECTORS, before_count],
+            timeout=timeout,
+        )
+    except Exception:
+        pass
+
+    return await _count_editor_images(page)
+
+
+async def _editor_content_stats(page) -> dict:
+    """저장 전 실제 에디터에 본문/이미지가 들어갔는지 확인."""
+    return await page.evaluate("""([textSelectors, imageSelectors]) => {
+        const textParts = [];
+        const textElements = new Set();
+        for (const sel of textSelectors) {
+            document.querySelectorAll(sel).forEach(el => textElements.add(el));
+        }
+        textElements.forEach(el => {
+            const txt = (el.innerText || el.textContent || '').trim();
+            if (txt) textParts.push(txt);
+        });
+
+        if (textParts.length === 0) {
+            const editable = document.querySelector('div[contenteditable="true"]') ||
+                document.querySelector('div[contenteditable]');
+            const fallbackText = editable ? editable.innerText.trim() : '';
+            if (fallbackText) textParts.push(fallbackText);
+        }
+
+        const text = textParts.join('\\n').trim();
+        const components = document.querySelectorAll('div.se-component.se-image');
+        if (components.length > 0) {
+            return {textLength: text.length, imageCount: components.length, sample: text.slice(0, 120)};
+        }
+
+        const imageSrcs = new Set();
+        for (const sel of imageSelectors) {
+            document.querySelectorAll(sel).forEach(el => {
+                if (el.src) imageSrcs.add(el.src);
+            });
+        }
+        return {textLength: text.length, imageCount: imageSrcs.size, sample: text.slice(0, 120)};
+    }""", [TEXT_SELECTORS, IMAGE_SELECTORS])
 
 
 async def set_content_with_images(page, blocks: list[dict], place: str = "", tags: list[str] | None = None, thumbnail: str = "", align_center: bool = False) -> None:
@@ -685,17 +810,12 @@ async def set_content_with_images(page, blocks: list[dict], place: str = "", tag
             else:
                 for img_path in valid_paths:
                     fixed_path = str(PROJECT_ROOT / "output" / f"fixed_{Path(img_path).name}")
-                    # 원본 경로 기준으로 thumbnail 여부 판단
-                    orig_path = next((p for p in paths if Path(p).name == Path(img_path).name), img_path)
-                    if orig_path == thumbnail:
-                        # 대표이미지: EXIF 제거 → 원본 가로 유지 (썸네일에 적합)
-                        strip_exif_orientation(img_path, fixed_path)
-                    else:
-                        # 일반 이미지: EXIF 적용 → 올바른 방향으로 표시
-                        from PIL import Image, ImageOps
-                        img = Image.open(img_path)
-                        img = ImageOps.exif_transpose(img)
-                        img.convert("RGB").save(fixed_path, "JPEG", quality=85)
+                    # 대표이미지도 일반 이미지와 동일하게 EXIF 회전을 적용한다.
+                    # EXIF만 제거하면 세로 사진이 sideways로 업로드될 수 있다.
+                    from PIL import Image, ImageOps
+                    img = Image.open(img_path)
+                    img = ImageOps.exif_transpose(img)
+                    img.convert("RGB").save(fixed_path, "JPEG", quality=85)
                     await _insert_image_block(page, fixed_path)
             await asyncio.sleep(0.5)
             # 이미지 삽입 후 텍스트 영역으로 커서 복원 (image→text 순서 지원)
@@ -1097,6 +1217,17 @@ async def upload_post(
                 await set_thumbnail(page, thumbnail, blocks)
 
             # 7. 태그는 본문 마지막에 #태그 형식으로 이미 삽입됨 (set_content_with_images에서 처리)
+            stats = await _editor_content_stats(page)
+            print(
+                f"  🔎 저장 전 확인: 본문 {stats['textLength']}자, "
+                f"이미지 {stats['imageCount']}개"
+            )
+            if blocks and stats["textLength"] < 500:
+                raise RuntimeError(
+                    f"저장 중단: 에디터 본문이 너무 짧습니다 ({stats['textLength']}자)"
+                )
+            if blocks and any(b.get("type") == "image" for b in blocks) and stats["imageCount"] == 0:
+                raise RuntimeError("저장 중단: 에디터에 삽입된 이미지가 없습니다")
 
             # 8. 저장/발행
             if do_publish:
@@ -1221,6 +1352,8 @@ def main():
         blocks = data.get("blocks", None)
         thumbnail = data.get("thumbnail", "")
         place = data.get("place", "")
+        if data.get("skip_place"):
+            place = ""
         align = data.get("align", "")
     else:
         title = args.title
