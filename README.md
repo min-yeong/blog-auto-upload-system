@@ -62,6 +62,34 @@ A: 양념이 맛있었어 특히 매콤새콤한 게 좋았음
 | `/blog-setup` | 초기 설정 | **최초 1회** |
 | `/blog-crawl` | 어투 재학습 | 글 스타일 바뀌었을 때 |
 
+## OpenClaw 연동
+
+이 맥에 OpenClaw를 상주 실행하고 채팅앱을 프론트로 사용할 수 있다.
+
+설치/상태 확인:
+
+```bash
+openclaw gateway status
+openclaw skills info naver-blog-upload
+openclaw models status
+```
+
+채팅앱 연결 예시:
+
+```bash
+openclaw channels list --all
+openclaw channels add --channel telegram --token <BOT_TOKEN>
+openclaw channels login --channel whatsapp
+```
+
+OpenClaw skill:
+
+```text
+skills/naver-blog-upload
+```
+
+채팅에서 사진을 올리고 `네이버 블로그 글 만들어줘` 또는 `naver-blog-upload 써서 임시저장해줘`라고 요청하면, OpenClaw가 질문/답변을 진행한 뒤 기존 `scripts/upload_naver.py`를 호출한다.
+
 ---
 
 ## 초기 설정 (최초 1회)
@@ -148,10 +176,13 @@ blog-auto-upload-system/
 │   └── browser_state/         # 로그인 세션
 ├── templates/
 │   └── blog_prompt.md         # 글 생성 프롬프트
+├── skills/
+│   └── naver-blog-upload/     # OpenClaw 연동 skill
 ├── config/
 │   ├── .env                   # 자격증명
 │   └── categories.json        # 카테고리 목록
 ├── output/                    # 생성된 글 JSON 백업
+├── openclaw_sessions/         # OpenClaw 작업 세션 (Git 제외)
 ├── venv/                      # Python 가상환경
 ├── requirements.txt
 └── .gitignore

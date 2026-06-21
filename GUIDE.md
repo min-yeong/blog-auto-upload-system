@@ -1,5 +1,69 @@
 # 블로그 업로드 사용 가이드
 
+## OpenClaw 로컬 상주 방식
+
+OpenClaw를 이 맥에 설치해두고, 채팅앱에서 사진과 답변을 받아 네이버 블로그 임시저장까지 처리하는 방식.
+
+### 현재 설치 상태 확인
+
+```bash
+openclaw gateway status
+openclaw skills info naver-blog-upload
+openclaw models status
+```
+
+정상 기준:
+
+- Gateway: `Runtime: running`
+- Skill: `naver-blog-upload ✓ Ready`
+- Model auth: `status=usable`
+
+### 채팅앱 연결
+
+OpenClaw 채널 연결은 사용할 앱에 따라 다름.
+
+```bash
+# 지원 채널 확인
+openclaw channels list --all
+
+# Telegram 예시: BotFather에서 받은 bot token 필요
+openclaw channels add --channel telegram --token <BOT_TOKEN>
+
+# WhatsApp 예시: QR/login 흐름
+openclaw channels login --channel whatsapp
+```
+
+채널 연결 후 채팅에서 이렇게 요청:
+
+```text
+네이버 블로그 글 만들어줘. 사진 올릴게.
+```
+
+또는 skill을 직접 지칭:
+
+```text
+naver-blog-upload 써서 이 사진들로 블로그 임시저장해줘
+```
+
+### OpenClaw 작업 흐름
+
+1. 채팅앱에 사진 업로드
+2. OpenClaw가 카테고리와 필요한 질문을 확인
+3. 답변을 바탕으로 `openclaw_sessions/<세션>/post.json` 생성
+4. `scripts/validate_post.py`로 검증
+5. 업로드 전 사용자 확인
+6. `scripts/upload_naver.py --file ...` 실행
+7. 네이버 블로그에 임시저장
+
+### 주의
+
+- 기본은 임시저장.
+- 공개 발행은 채팅에서 명시적으로 요청했을 때만.
+- 캡차/2차 인증은 맥에 뜬 브라우저에서 직접 처리.
+- `config/.env`, `cache/browser_state/`, 네이버 세션 정보는 채팅에 출력하지 않음.
+
+---
+
 ## 매번 하는 것
 
 ### 1. 사진 바탕화면에 저장

@@ -3,6 +3,7 @@ cache/browser_state/
 cache/crawled_posts/
 cache/tone_profile.json
 output/
+openclaw_sessions/
 __pycache__/
 *.pyc
 .DS_Store

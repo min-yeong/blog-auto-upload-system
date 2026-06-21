@@ -26,6 +26,7 @@ EDITOR_URL = f"https://blog.naver.com/{BLOG_ID}/postwrite"
 
 # SmartEditor ONE 타임아웃 (ms)
 EDITOR_LOAD_TIMEOUT = 20000
+IMAGE_UPLOAD_TIMEOUT = 120000
 ACTION_DELAY = 500  # 액션 간 딜레이 (ms)
 
 IMAGE_SELECTORS = [
@@ -618,14 +619,22 @@ async def _insert_image_block(page, img_path: str) -> None:
     if not uploaded:
         raise RuntimeError(f"이미지 파일 선택 실패: {Path(img_path).name}")
 
+    await _wait_for_image_upload_settle(page, timeout=IMAGE_UPLOAD_TIMEOUT)
+
     insert_btn = page.locator("button.se-popup-button-confirm")
     if await insert_btn.count() > 0 and await insert_btn.first.is_visible():
         await insert_btn.first.click()
-        await asyncio.sleep(1)
+        await _wait_for_image_upload_settle(page, timeout=IMAGE_UPLOAD_TIMEOUT)
 
-    after_count = await _wait_for_image_count_increase(page, before_count)
+    after_count = await _wait_for_image_count_increase(
+        page,
+        before_count,
+        timeout=IMAGE_UPLOAD_TIMEOUT,
+    )
     if after_count <= before_count:
-        raise RuntimeError(f"이미지 삽입 실패: {Path(img_path).name}")
+        status = await _image_upload_status_text(page)
+        detail = f" ({status})" if status else ""
+        raise RuntimeError(f"이미지 삽입 실패: {Path(img_path).name}{detail}")
 
     print(f"  📸 {Path(img_path).name}")
 
@@ -666,29 +675,65 @@ async def _count_editor_images(page) -> int:
     }""", IMAGE_SELECTORS)
 
 
+async def _image_upload_status_text(page) -> str:
+    """네이버 이미지 업로드 진행/오류 문구를 수집."""
+    return await page.evaluate("""() => {
+        const keywords = ['업로드', '전송', '준비', '실패', '오류'];
+        const parts = [];
+        const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+        while (walker.nextNode()) {
+            const text = walker.currentNode.nodeValue.replace(/\\s+/g, ' ').trim();
+            if (!text) continue;
+            if (keywords.some(k => text.includes(k))) {
+                parts.push(text);
+            }
+        }
+        return [...new Set(parts)].slice(0, 5).join(' / ');
+    }""")
+
+
+async def _wait_for_image_upload_settle(page, timeout: int = IMAGE_UPLOAD_TIMEOUT) -> None:
+    """업로드 진행 문구가 사라지거나 이미지가 렌더링될 때까지 대기."""
+    deadline = asyncio.get_running_loop().time() + (timeout / 1000)
+
+    while asyncio.get_running_loop().time() < deadline:
+        try:
+            state = await page.evaluate("""() => {
+                const bodyText = document.body ? document.body.innerText : '';
+                return {
+                    uploading: /업로드 준비|전송중|업로드 중|처리중/.test(bodyText),
+                    failed: /업로드 실패|전송 실패|오류가 발생/.test(bodyText),
+                };
+            }""")
+            if state.get("failed"):
+                return
+            if not state.get("uploading"):
+                return
+        except Exception:
+            pass
+
+        await asyncio.sleep(1)
+
+    status = await _image_upload_status_text(page)
+    raise RuntimeError(f"이미지 업로드 대기 초과: {status or '상태 문구 없음'}")
+
+
 async def _wait_for_image_count_increase(page, before_count: int, timeout: int = 20000) -> int:
     """이미지 업로드 후 에디터 이미지 개수가 늘어날 때까지 대기."""
-    try:
-        await page.wait_for_function(
-            """([selectors, before]) => {
-                const components = document.querySelectorAll('div.se-component.se-image');
-                if (components.length > before) return true;
+    deadline = asyncio.get_running_loop().time() + (timeout / 1000)
+    latest_count = before_count
 
-                const srcs = new Set();
-                for (const sel of selectors) {
-                    document.querySelectorAll(sel).forEach(el => {
-                        if (el.src) srcs.add(el.src);
-                    });
-                }
-                return srcs.size > before;
-            }""",
-            [IMAGE_SELECTORS, before_count],
-            timeout=timeout,
-        )
-    except Exception:
-        pass
+    while asyncio.get_running_loop().time() < deadline:
+        try:
+            latest_count = await _count_editor_images(page)
+            if latest_count > before_count:
+                return latest_count
+        except Exception:
+            pass
 
-    return await _count_editor_images(page)
+        await asyncio.sleep(1)
+
+    return latest_count
 
 
 async def _editor_content_stats(page) -> dict:
