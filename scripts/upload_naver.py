@@ -10,6 +10,7 @@
 
 import asyncio
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -18,7 +19,7 @@ from playwright.async_api import async_playwright
 # 프로젝트 루트를 path에 추가
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from scripts.utils.naver_auth import ensure_login, BLOG_ID, NAVER_ID, NAVER_PW
+from scripts.utils.naver_auth import ensure_login, BLOG_ID, fill_naver_credentials
 from scripts.utils.image_utils import stitch_images_horizontally, mosaic_faces_in_paths
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -44,6 +45,50 @@ TEXT_SELECTORS = [
     "div.se-component.se-text",
 ]
 
+LOCATION_SUFFIXES = ("동", "구", "시", "군", "읍", "면", "리")
+
+
+def _split_korean_terms(value: str) -> list[str]:
+    if not value:
+        return []
+    return [term for term in re.split(r"[\s,()/|·]+", value.strip()) if len(term) > 1]
+
+
+def _extract_location_terms(*values: str) -> list[str]:
+    terms: list[str] = []
+    for value in values:
+        for term in _split_korean_terms(value):
+            if term.endswith(LOCATION_SUFFIXES) and term not in terms:
+                terms.append(term)
+    return terms
+
+
+def _place_match_requirements(place_name: str, place_context: dict | None = None) -> tuple[list[str], list[str]]:
+    place_context = place_context or {}
+    context_values = [
+        str(place_context.get("user_place") or ""),
+        str(place_context.get("address") or ""),
+    ]
+    name_terms = _split_korean_terms(place_name)
+    location_terms = _extract_location_terms(place_name, *context_values)
+    return name_terms, location_terms
+
+
+def _place_result_matches(
+    result_text: str,
+    place_name: str,
+    place_context: dict | None = None,
+) -> tuple[bool, str]:
+    name_terms, location_terms = _place_match_requirements(place_name, place_context)
+    missing_name_terms = [term for term in name_terms if term not in result_text]
+    if missing_name_terms:
+        return False, f"이름/검색어 누락: {', '.join(missing_name_terms)}"
+
+    if location_terms and not any(term in result_text for term in location_terms):
+        return False, f"지역 불일치: 기대 지역 {', '.join(location_terms)}"
+
+    return True, ""
+
 
 async def _auto_login_if_needed(page) -> None:
     """로그인 페이지로 리다이렉트된 경우 자동 로그인."""
@@ -51,9 +96,7 @@ async def _auto_login_if_needed(page) -> None:
         return
 
     print("  로그인 필요 - 자동 로그인 시도...")
-    await page.evaluate(f'document.getElementById("id").value = "{NAVER_ID}"')
-    await asyncio.sleep(0.3)
-    await page.evaluate(f'document.getElementById("pw").value = "{NAVER_PW}"')
+    await fill_naver_credentials(page)
     await asyncio.sleep(0.3)
 
     login_btn = page.locator("#log\\.login")
@@ -432,7 +475,7 @@ async def _type_bullet_list(page, text: str) -> None:
     print("  📋 영업정보 입력 완료")
 
 
-async def insert_place_widget(page, place_name: str) -> None:
+async def insert_place_widget(page, place_name: str, place_context: dict | None = None) -> None:
     """네이버 지도 장소 위젯 삽입.
 
     에디터 툴바의 '장소' 버튼 → 장소 검색 → 결과 클릭 → 확인 순서로 동작.
@@ -486,12 +529,15 @@ async def insert_place_widget(page, place_name: str) -> None:
 
             if item_info:
                 result_text = item_info.get("text", "")
-                required_terms = [t for t in place_name.split() if len(t) > 1]
-                missing_terms = [t for t in required_terms if t not in result_text]
-                if missing_terms:
+                matches, mismatch_reason = _place_result_matches(
+                    result_text,
+                    place_name,
+                    place_context,
+                )
+                if not matches:
                     print(
                         f"  🔍 장소 검색 결과 불일치: '{result_text}' "
-                        f"(누락: {', '.join(missing_terms)})"
+                        f"({mismatch_reason})"
                     )
                     item_rect = None
 
@@ -641,6 +687,8 @@ async def _insert_image_block(page, img_path: str) -> None:
 
 async def _set_image_file_from_toolbar(page, photo_btn, img_path: str) -> bool:
     """사진 버튼에서 파일 선택 UI를 열고 이미지를 지정."""
+    await page.keyboard.press("Escape")
+    await asyncio.sleep(0.2)
     try:
         async with page.expect_file_chooser(timeout=5000) as fc_info:
             await photo_btn.click()
@@ -648,6 +696,8 @@ async def _set_image_file_from_toolbar(page, photo_btn, img_path: str) -> bool:
         await file_chooser.set_files(img_path)
         return True
     except Exception:
+        await page.keyboard.press("Escape")
+        await asyncio.sleep(0.2)
         await photo_btn.click()
         await asyncio.sleep(1)
 
@@ -772,7 +822,15 @@ async def _editor_content_stats(page) -> dict:
     }""", [TEXT_SELECTORS, IMAGE_SELECTORS])
 
 
-async def set_content_with_images(page, blocks: list[dict], place: str = "", tags: list[str] | None = None, thumbnail: str = "", align_center: bool = False) -> None:
+async def set_content_with_images(
+    page,
+    blocks: list[dict],
+    place: str = "",
+    tags: list[str] | None = None,
+    thumbnail: str = "",
+    align_center: bool = False,
+    place_context: dict | None = None,
+) -> None:
     """텍스트와 이미지를 교차 입력.
 
     blocks 형식:
@@ -846,7 +904,7 @@ async def set_content_with_images(page, blocks: list[dict], place: str = "", tag
             valid_paths = mosaic_faces_in_paths(valid_paths, mosaic_dir)
             # 대표이미지가 포함된 블록은 합치지 않고 개별 업로드 (EXIF 회전 적용)
             contains_thumbnail = thumbnail and thumbnail in paths
-            if len(valid_paths) >= 2 and not contains_thumbnail:
+            if len(valid_paths) >= 2 and not contains_thumbnail and block.get("stitch") is not False:
                 # 2장 이상이면 가로로 합쳐서 한 장으로 업로드
                 combined_path = str(PROJECT_ROOT / "output" / f"combined_{id(block)}.jpeg")
                 stitch_images_horizontally(valid_paths, combined_path)
@@ -876,7 +934,7 @@ async def set_content_with_images(page, blocks: list[dict], place: str = "", tag
     # 장소(네이버 지도) 위젯 삽입
     if place:
         print("  장소 삽입...")
-        await insert_place_widget(page, place)
+        await insert_place_widget(page, place, place_context=place_context)
 
     # 태그를 장소 위젯 아래에 #태그 형식으로 삽입
     if tags:
@@ -1203,6 +1261,7 @@ async def upload_post(
     blocks: list[dict] | None = None,
     thumbnail: str = "",
     place: str = "",
+    place_context: dict | None = None,
     align: str = "",
     do_publish: bool = False,
     headless: bool = False,
@@ -1218,6 +1277,7 @@ async def upload_post(
         blocks: 텍스트/이미지 교차 블록 리스트 (있으면 content/images 무시)
         thumbnail: 대표이미지 경로 (본문 내 이미지 중 선택)
         place: 장소 이름 (네이버 지도 와이드형 위젯 삽입)
+        place_context: 사용자 답변/지도 주소 기반 장소 검증 힌트
         align: 텍스트 정렬 ("center"이면 가운데 정렬)
         do_publish: True면 발행, False면 임시저장 (기본)
         headless: 헤드리스 모드
@@ -1245,7 +1305,15 @@ async def upload_post(
             # 3. 본문 + 이미지 입력 (장소 위젯은 맨 마지막에 삽입)
             if blocks:
                 print("  본문+이미지 교차 입력...")
-                await set_content_with_images(page, blocks, place=place, tags=tags, thumbnail=thumbnail, align_center=(align == "center"))
+                await set_content_with_images(
+                    page,
+                    blocks,
+                    place=place,
+                    tags=tags,
+                    thumbnail=thumbnail,
+                    align_center=(align == "center"),
+                    place_context=place_context,
+                )
             else:
                 print("  본문 입력...")
                 await set_content(page, content)
@@ -1313,9 +1381,7 @@ async def test_upload():
             print("  로그인 시도...")
             await page.goto("https://nid.naver.com/nidlogin.login", wait_until="domcontentloaded")
             await asyncio.sleep(2)
-            await page.evaluate(f'document.getElementById("id").value = "{NAVER_ID}"')
-            await asyncio.sleep(0.3)
-            await page.evaluate(f'document.getElementById("pw").value = "{NAVER_PW}"')
+            await fill_naver_credentials(page)
             await asyncio.sleep(0.3)
             login_btn = page.locator("#log\\.login")
             if await login_btn.count() == 0:
@@ -1399,6 +1465,14 @@ def main():
         place = data.get("place", "")
         if data.get("skip_place"):
             place = ""
+        draft_contract = data.get("draft_contract") or {}
+        place_info = draft_contract.get("place_info") or {}
+        place_facts = place_info.get("facts") or {}
+        user_answers = draft_contract.get("user_answers") or {}
+        place_context = {
+            "user_place": user_answers.get("place", ""),
+            "address": place_facts.get("address", ""),
+        }
         align = data.get("align", "")
     else:
         title = args.title
@@ -1409,6 +1483,7 @@ def main():
         blocks = None
         thumbnail = ""
         place = ""
+        place_context = {}
         align = ""
 
     success = asyncio.run(upload_post(
@@ -1420,6 +1495,7 @@ def main():
         blocks=blocks,
         thumbnail=thumbnail,
         place=place,
+        place_context=place_context,
         align=align,
         do_publish=args.publish,
     ))

@@ -129,17 +129,20 @@ async def login_naver(page, manual: bool = True) -> bool:
         return await _auto_login(page)
 
 
+async def fill_naver_credentials(page) -> None:
+    """네이버 로그인 폼에 계정 정보를 입력한다."""
+    await page.locator("#id").fill(NAVER_ID)
+    await page.locator("#pw").fill(NAVER_PW)
+
+
 async def _auto_login(page) -> bool:
-    """자동 로그인 시도 (JS evaluate 방식)."""
+    """자동 로그인 시도."""
     import asyncio
 
     try:
         await asyncio.sleep(2)
 
-        # JS로 직접 값 설정 (봇 감지 최소화)
-        await page.evaluate(f'document.getElementById("id").value = "{NAVER_ID}"')
-        await asyncio.sleep(0.3)
-        await page.evaluate(f'document.getElementById("pw").value = "{NAVER_PW}"')
+        await fill_naver_credentials(page)
         await asyncio.sleep(0.3)
 
         # 로그인 버튼 클릭
